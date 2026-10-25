@@ -23,19 +23,9 @@ import urllib.request
 import uuid
 import zlib
 
-IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.4")
+IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.5")
 ROUTE = "/lovelace/energy"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-# These test-only containers run WebKit's nested Bubblewrap sandbox. Docker's
-# default seccomp, AppArmor, and masked /proc paths prevent its namespace setup.
-RENDERER_SECURITY_OPTIONS = (
-    "--security-opt",
-    "seccomp=unconfined",
-    "--security-opt",
-    "apparmor=unconfined",
-    "--security-opt",
-    "systempaths=unconfined",
-)
 
 
 def docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -175,7 +165,6 @@ class _ServiceTests(unittest.TestCase):
             "SETUID",
             "--cap-add",
             "SETGID",
-            *RENDERER_SECURITY_OPTIONS,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -452,13 +441,13 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(headers.get_content_type(), "image/png")
         self.assertEqual(decode_rgba_png(image)[:2], (1280, 800))
 
-    def test_web_process_is_non_root_and_uses_bubblewrap(self) -> None:
+    def test_web_process_is_non_root_without_nested_bubblewrap(self) -> None:
         self.assertEqual(
             docker("inspect", "--format", "{{.Config.User}}", IMAGE).stdout.strip(),
             "0:0",
         )
         processes = docker("exec", self.name, "ps", "-eo", "uid,args").stdout
-        self.assertIn("/usr/bin/bwrap", processes)
+        self.assertNotIn("/usr/bin/bwrap", processes)
         self.assertIn("WPEWebProcess", processes)
         renderer_processes = [
             line
@@ -518,7 +507,6 @@ class _ServiceTests(unittest.TestCase):
             "SETGID",
             "--cap-add",
             "CHOWN",
-            *RENDERER_SECURITY_OPTIONS,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -554,7 +542,7 @@ class _ServiceTests(unittest.TestCase):
                 "exec", name, "stat", "-c", "%u:%a", "/data/options.json"
             ).stdout.strip()
             self.assertEqual(options_mode, "0:600")
-            token_handoff = (
+            token_file_state = (
                 docker(
                     "exec",
                     "--user",
@@ -563,16 +551,15 @@ class _ServiceTests(unittest.TestCase):
                     "/bin/sh",
                     "-c",
                     (
-                        "set -- /tmp/wpe-ha-token.*; "
-                        '[ "$#" -eq 1 ] || exit 1; '
-                        '[ -r "$1" ] || exit 2; '
-                        'stat -c \'%u:%g:%a\' "$1"; cat "$1"'
+                        "for token_file in /tmp/wpe-ha-token.*; do "
+                        '[ ! -e "$token_file" ] || exit 1; '
+                        "done; echo removed"
                     ),
                 )
                 .stdout.strip()
                 .splitlines()
             )
-            self.assertEqual(token_handoff, ["10001:10001:400", token])
+            self.assertEqual(token_file_state, ["removed"])
             processes = docker("exec", name, "ps", "-eo", "uid,args").stdout
             self.assertNotRegex(processes, r"(?m)^0\s+.*wpe-screenshot-engine")
             process_status = docker("exec", name, "cat", "/proc/1/status").stdout
@@ -582,6 +569,22 @@ class _ServiceTests(unittest.TestCase):
                 if line.startswith("CapEff:")
             )
             self.assertEqual(effective_caps, "0000000000000000")
+            status, _, body = request_at(port, ROUTE + "?wait=0", timeout=8)
+            self.assertEqual(status, 502, body.decode("utf-8", "replace"))
+            renderer_environment = docker(
+                "exec",
+                name,
+                "/bin/sh",
+                "-c",
+                (
+                    "for proc in /proc/[0-9]*; do "
+                    'if grep -aq WPEWebProcess "$proc/cmdline" 2>/dev/null; then '
+                    "tr '\\000' '\\n' < \"$proc/environ\"; exit 0; "
+                    "fi; done; exit 1"
+                ),
+            ).stdout
+            self.assertNotIn("HA_TOKEN_FILE=", renderer_environment)
+            self.assertNotIn(token, renderer_environment)
         finally:
             docker("rm", "--force", name, check=False)
 
@@ -615,7 +618,6 @@ class _ServiceTests(unittest.TestCase):
                 "SETGID",
                 "--cap-add",
                 "CHOWN",
-                *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
                 "--pids-limit",
@@ -650,7 +652,12 @@ class _ServiceTests(unittest.TestCase):
                         pass
                     time.sleep(0.2)
                 else:
-                    self.fail("token test container did not become ready")
+                    logs = docker("logs", name, check=False)
+                    self.fail(
+                        "token test container did not become ready:\n"
+                        + logs.stdout
+                        + logs.stderr
+                    )
 
                 status, _, body = request_at(port, ROUTE + "?wait=0", timeout=8)
                 self.assertEqual(status, 502, body.decode("utf-8", "replace"))
@@ -840,7 +847,6 @@ class _ServiceTests(unittest.TestCase):
                 "SETUID",
                 "--cap-add",
                 "SETGID",
-                *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
                 "--pids-limit",
@@ -941,7 +947,6 @@ class _ServiceTests(unittest.TestCase):
                 "SETUID",
                 "--cap-add",
                 "SETGID",
-                *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
                 "--pids-limit",

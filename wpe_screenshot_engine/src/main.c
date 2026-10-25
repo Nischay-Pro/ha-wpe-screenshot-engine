@@ -416,7 +416,16 @@ load_runtime_config(App *app)
             g_printerr("configuration error: HA token file must be a readable regular file containing a bounded UTF-8 token\n");
             return FALSE;
         }
+        if (g_str_has_prefix(app->token_file, "/tmp/wpe-ha-token.") &&
+            g_unlink(app->token_file) < 0 && errno != ENOENT) {
+            secure_free_string(app->token);
+            app->token = NULL;
+            g_printerr("configuration error: unable to remove temporary Home Assistant token file\n");
+            return FALSE;
+        }
     }
+    g_unsetenv("HA_TOKEN_FILE");
+    g_clear_pointer(&app->token_file, g_free);
     return TRUE;
 }
 
@@ -1421,7 +1430,7 @@ init_app(App *app)
     if (!app->view)
         return FALSE;
 
-    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.1.4", NULL);
+    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.1.5", NULL);
     soup_server_add_early_handler(app->server, NULL, handle_early_request, NULL, NULL);
     soup_server_add_handler(app->server, NULL, handle_request, app, NULL);
     GError *error = NULL;

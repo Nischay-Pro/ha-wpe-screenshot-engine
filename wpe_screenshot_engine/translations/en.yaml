@@ -26,4 +26,4 @@ configuration:
     name: WebKit memory pressure target
     description: Per-process WebKit memory target, from 512 to 3072 MiB.
 network:
-  8080/tcp: Internal screenshot API. Not published by default.
+  8080/tcp: Host port mapped to the internal screenshot API (default 19433).

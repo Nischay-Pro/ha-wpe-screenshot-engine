@@ -1,6 +1,6 @@
 name: "WPE Screenshot Engine"
 slug: "wpe_screenshot_engine"
-version: "0.1.4"
+version: "0.1.5"
 description: "Headless WPE WebKit screenshot renderer for Home Assistant dashboards"
 url: "https://github.com/Nischay-Pro/ha-wpe-screenshot-engine"
 image: "ghcr.io/nischay-pro/ha-wpe-screenshot-engine"
@@ -10,9 +10,9 @@ arch:
 startup: services
 tmpfs: true
 ports:
-  8080/tcp: null
+  8080/tcp: 19433
 ports_description:
-  8080/tcp: "Internal HTTP endpoint for the HA MCP screenshot client"
+  8080/tcp: "Host port for the HA MCP screenshot client (default 19433)"
 options:
   home_assistant_url: "http://homeassistant:8123"
   dashboard_path: "lovelace/energy"

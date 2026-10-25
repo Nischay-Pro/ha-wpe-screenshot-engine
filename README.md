@@ -49,7 +49,7 @@ The Home Assistant access token is required. The app configuration form masks th
 
 | Setting | Description | Default |
 | --- | --- | --- |
-| Home Assistant URL | Base HTTP or HTTPS URL reachable from the app, without a path. | `http://homeassistant:8123` |
+| Home Assistant URL | Base HTTP or HTTPS URL reachable from the app, without a path. The default internal hostname is correct for Supervisor apps. | `http://homeassistant:8123` |
 | Home Assistant access token | Long-lived token for a dedicated, non-admin Home Assistant user. | Required |
 | Home Assistant route | Dashboard path to capture, without a leading slash. | `lovelace/energy` |
 | Readiness text | Visible dashboard text required before a screenshot is returned. | `Energy at a glance` |
@@ -62,9 +62,11 @@ Create the access token from the dedicated user's Home Assistant profile. Give t
 ## Connect Home Assistant MCP
 
 1. Enable dashboard screenshots in Home Assistant MCP.
-2. Set the screenshot engine URL to `http://<app-hostname>:8080`.
+2. Set the screenshot engine URL based on where Home Assistant MCP runs:
+   - If it shares the Home Assistant app network, use `http://<app-hostname>:8080`.
+   - If it runs outside that network, use `http://<home-assistant-host>:19433` by default.
 
-Use the WPE Screenshot Engine's internal Home Assistant app hostname. The exact hostname depends on how the repository was added. Do not use `localhost` from the MCP app; that points to the MCP app itself. The dashboard route is configured in the WPE Screenshot Engine app.
+The internal hostname depends on how the repository was added. Do not use `localhost` from the MCP app; that points to the MCP app itself. The dashboard route is configured in the WPE Screenshot Engine app. Change the host port in the app's **Network** settings if `19433` is already in use, and use that port in the MCP URL.
 
 For a Docker-based MCP installation, set `HAMCP_DASHBOARD_SCREENSHOT_ENGINE_URL` to the same URL. See the [Home Assistant MCP screenshot guide](https://github.com/homeassistant-ai/ha-mcp/blob/master/docs/beta.md) for its current setup instructions.
 
@@ -89,23 +91,23 @@ The endpoint returns `image/png`. `GET /healthz` checks whether the service is r
 
 ## Network and security
 
-The API listens on port `8080` inside the Home Assistant app network. The port is not published on the host by default. If a client outside that network needs access, map a host port in the app's **Network** settings and keep it on a trusted network.
+The API listens on port `8080` inside the Home Assistant app network. Host port `19433` is mapped to it by default and can be changed in the app's **Network** settings. The screenshot API has no separate authentication, so keep the mapped port on a trusted network and do not expose it directly to the internet. Use a dedicated, non-admin Home Assistant user for the access token.
 
-The screenshot API has no separate authentication. Do not expose it directly to the internet. Use a dedicated, non-admin Home Assistant user for the access token. The renderer runs as an unprivileged app user after startup.
+Nested Linux namespaces are restricted inside Home Assistant apps, which prevents WebKit's Bubblewrap process sandbox from starting. The app disables that inner sandbox so rendering works in the app container; Supervisor's outer container restrictions remain enabled, and the renderer runs as UID `10001` with no Linux capabilities. This reduces browser-process isolation, so use trusted dashboards. The app removes its temporary token file after reading it and before starting WebKit. WebKit's [upstream sandbox override](https://bugs.webkit.org/show_bug.cgi?id=250232) is deliberately named to flag this security tradeoff.
 
 ## Troubleshooting
 
 - **Startup reports that the HA token file is not readable:** update the app to version `0.1.4` or later.
 - **Login page or authorization error:** check the Home Assistant URL and token, and confirm the token's user can open the configured dashboard.
 - **Dashboard never becomes ready:** check that the readiness text is visible on the selected route. Change the route or readiness text if needed.
-- **MCP cannot connect:** confirm that its screenshot engine URL uses the app's internal hostname and port `8080`.
+- **MCP cannot connect:** use the app hostname and port `8080` on the shared app network, or the Home Assistant host address and mapped port (default `19433`) from outside it.
 
 ## Development
 
 Build the app image and run the HTTP and security regression tests on Ubuntu:
 
 ```sh
-docker build --tag wpe-screenshot-engine:0.1.4 ./wpe_screenshot_engine
+docker build --tag wpe-screenshot-engine:0.1.5 ./wpe_screenshot_engine
 python3 -m unittest discover -s tests -v
 pre-commit install
 pre-commit run --all-files

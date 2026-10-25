@@ -26,7 +26,7 @@ FROM debian:forky-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_ARCH=amd64
-ARG BUILD_VERSION=0.1.4
+ARG BUILD_VERSION=0.1.5
 LABEL io.hass.name="WPE Screenshot Engine" \
       io.hass.description="Private WPE WebKit engine for Home Assistant dashboard screenshots" \
       io.hass.type="app" \
@@ -37,7 +37,6 @@ LABEL io.hass.name="WPE Screenshot Engine" \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      bubblewrap \
       ca-certificates \
       fonts-dejavu-core \
       jq \
@@ -51,7 +50,10 @@ RUN apt-get update \
     && printf '%s\n' 'wpe:x:10001:10001:WPE renderer:/tmp/wpe-home:/usr/sbin/nologin' >> /etc/passwd \
     && printf '%s\n' 'wpe:x:10001:' >> /etc/group
 
-ENV HOME=/tmp/wpe-home \
+# The Supervisor container's restrictions prevent WebKit's nested Bubblewrap
+# namespace from starting. Keep the outer container restrictions enabled.
+ENV WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
+    HOME=/tmp/wpe-home \
     XDG_CACHE_HOME=/tmp/wpe-cache \
     TMPDIR=/tmp \
     WPE_PLATFORM=headless \
