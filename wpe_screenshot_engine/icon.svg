@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Webpage screenshot">
+  <g fill="none" stroke="#315BFF" stroke-linecap="round" stroke-width="12">
+    <path d="M82 22H31a9 9 0 0 0-9 9v51" />
+    <path d="M174 22h51a9 9 0 0 1 9 9v51" />
+    <path d="M22 174v51a9 9 0 0 0 9 9h51" />
+    <path d="M234 174v51a9 9 0 0 1-9 9h-51" />
+  </g>
+
+  <rect x="67" y="75" width="122" height="106" rx="15" fill="#91C8FF" stroke="#315BFF" stroke-width="11" />
+  <path d="M72 108h112" stroke="#315BFF" stroke-width="10" />
+  <circle cx="88" cy="92" r="4" fill="#315BFF" />
+  <circle cx="102" cy="92" r="4" fill="#315BFF" />
+  <circle cx="116" cy="92" r="4" fill="#315BFF" />
+  <path d="M87 132h44M87 148h82M87 164h61" stroke="#315BFF" stroke-linecap="round" stroke-width="8" />
+</svg>
