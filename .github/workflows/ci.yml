@@ -58,6 +58,20 @@ jobs:
           push: "false"
           version: ci-${{ github.sha }}
 
+      # WebKit's Bubblewrap renderer needs user namespaces. Relax Ubuntu's
+      # host restriction only on this disposable test runner.
+      - name: Enable user namespaces for the WebKit sandbox
+        run: |
+          userns_clone="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$userns_clone" ] && [ "$userns_clone" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
+          apparmor_userns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$apparmor_userns" ] && [ "$apparmor_userns" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Run HTTP and security regression tests
         env:
           WPE_IMAGE: ${{ matrix.image }}:ci-${{ github.sha }}

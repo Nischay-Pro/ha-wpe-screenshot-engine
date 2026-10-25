@@ -153,7 +153,6 @@ class _ServiceTests(unittest.TestCase):
         docker(
             "run",
             "--detach",
-            "--rm",
             "--init",
             "--name",
             cls.name,
@@ -164,6 +163,9 @@ class _ServiceTests(unittest.TestCase):
             "ALL",
             "--security-opt",
             "seccomp=unconfined",
+            # Docker's default AppArmor profile denies the nested Bubblewrap mounts.
+            "--security-opt",
+            "apparmor=unconfined",
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -203,6 +205,20 @@ class _ServiceTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        state = docker(
+            "inspect",
+            "--format",
+            "{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}",
+            cls.name,
+            check=False,
+        )
+        if state.returncode == 0 and not state.stdout.startswith("running"):
+            logs = docker("logs", cls.name, check=False)
+            print(
+                "Fixture container exited unexpectedly:\n"
+                f"{state.stdout}{logs.stdout}{logs.stderr}",
+                flush=True,
+            )
         docker("rm", "--force", cls.name, check=False)
 
     def test_liveness_and_readiness(self) -> None:

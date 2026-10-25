@@ -34,4 +34,3 @@ The app listens internally on port `8080`. Its host port mapping is disabled by 
 GitHub Actions runs source and configuration linters, the Home Assistant app linter, and Hadolint for the Dockerfile on each push and pull request. To run the source hooks locally, install `pre-commit`, `cppcheck`, `shellcheck`, and `yamllint`, then run `pre-commit run --all-files`.
 
 The test workflow builds the app for `amd64` and `aarch64` on native runners, then runs fixture-based HTTP, input-validation, token-handling, renderer-reuse, and PNG-output checks against each image. It also runs the pinned Home Assistant MCP capture client against the fixture on both architectures. These checks do not need a live Home Assistant instance or token.
-

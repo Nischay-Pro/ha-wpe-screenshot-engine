@@ -9,14 +9,11 @@ arch:
   - aarch64
   - amd64
 startup: services
-boot: auto
-init: true
 tmpfs: true
 ports:
   8080/tcp: null
 ports_description:
   8080/tcp: "Internal HTTP endpoint for the HA MCP screenshot client"
-watchdog: "http://[HOST]:8080/readyz"
 options:
   home_assistant_url: "http://homeassistant:8123"
   dashboard_path: "lovelace/energy"

@@ -44,6 +44,7 @@ RUN apt-get update \
       libgles2 \
       libpng16-16t64 \
       libsoup-3.0-0 \
+      wget \
       libwpewebkit-2.0-1 \
     && rm -rf /var/lib/apt/lists/* \
     && printf '%s\n' 'wpe:x:10001:10001:WPE renderer:/tmp/wpe-home:/usr/sbin/nologin' >> /etc/passwd \
@@ -66,3 +67,5 @@ RUN chmod 0555 /usr/local/bin/wpe-screenshot-engine /usr/local/bin/run.sh \
 
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/run.sh"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD ["/usr/bin/wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/readyz"]
