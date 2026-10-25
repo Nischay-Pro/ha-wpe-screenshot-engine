@@ -26,6 +26,16 @@ import zlib
 IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.3")
 ROUTE = "/lovelace/energy"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# These test-only containers run WebKit's nested Bubblewrap sandbox. Docker's
+# default seccomp, AppArmor, and masked /proc paths prevent its namespace setup.
+RENDERER_SECURITY_OPTIONS = (
+    "--security-opt",
+    "seccomp=unconfined",
+    "--security-opt",
+    "apparmor=unconfined",
+    "--security-opt",
+    "systempaths=unconfined",
+)
 
 
 def docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -161,11 +171,7 @@ class _ServiceTests(unittest.TestCase):
             "/tmp:rw,nosuid,size=512m",
             "--cap-drop",
             "ALL",
-            "--security-opt",
-            "seccomp=unconfined",
-            # Docker's default AppArmor profile denies the nested Bubblewrap mounts.
-            "--security-opt",
-            "apparmor=unconfined",
+            *RENDERER_SECURITY_OPTIONS,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -476,8 +482,7 @@ class _ServiceTests(unittest.TestCase):
                 "/tmp:rw,nosuid,size=512m",
                 "--cap-drop",
                 "ALL",
-                "--security-opt",
-                "seccomp=unconfined",
+                *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
                 "--pids-limit",
@@ -688,8 +693,7 @@ class _ServiceTests(unittest.TestCase):
                 "/tmp:rw,nosuid,size=512m",
                 "--cap-drop",
                 "ALL",
-                "--security-opt",
-                "seccomp=unconfined",
+                *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
                 "--pids-limit",
@@ -786,8 +790,7 @@ class _ServiceTests(unittest.TestCase):
                 "/tmp:rw,nosuid,size=512m",
                 "--cap-drop",
                 "ALL",
-                "--security-opt",
-                "seccomp=unconfined",
+                *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
                 "--pids-limit",

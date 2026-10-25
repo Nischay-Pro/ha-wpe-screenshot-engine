@@ -31,13 +31,14 @@ fi
 docker build --target build -t "$BUILD_IMAGE" ./wpe_screenshot_engine
 docker network create "$NETWORK_NAME" >/dev/null
 
-# The CI host permits user namespaces; Docker's default profile blocks bwrap mounts.
+# Bubblewrap needs user namespaces and an unmasked /proc for its nested procfs.
 docker run --detach --init --name "$ENGINE_NAME" \
     --network "$NETWORK_NAME" --network-alias wpe-fixture \
     --read-only --tmpfs /tmp:rw,nosuid,size=512m \
     --cap-drop ALL \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
+    --security-opt systempaths=unconfined \
     --security-opt no-new-privileges:true \
     --pids-limit 128 --memory 768m --cpus 2 \
     --env WPE_FIXTURE_MODE=1 \
