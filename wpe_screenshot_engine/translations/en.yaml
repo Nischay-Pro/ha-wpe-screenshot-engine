@@ -16,7 +16,7 @@ configuration:
   expected_text:
     name: Readiness text
     description: >-
-      Visible text required on the readiness check route. Leave blank to skip
+      Optional visible text checked on the readiness route. Leave blank to skip
       the text check; other requested dashboard routes do not use this text.
   render_deadline_seconds:
     name: Render deadline

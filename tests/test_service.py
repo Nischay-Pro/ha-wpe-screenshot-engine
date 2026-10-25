@@ -23,7 +23,7 @@ import urllib.request
 import uuid
 import zlib
 
-IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.6")
+IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.7")
 ROUTE = "/lovelace/energy"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 

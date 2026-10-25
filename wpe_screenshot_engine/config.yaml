@@ -1,6 +1,6 @@
 name: "WPE Screenshot Engine"
 slug: "wpe_screenshot_engine"
-version: "0.1.6"
+version: "0.1.7"
 description: "Headless WPE WebKit screenshot renderer for Home Assistant dashboards"
 url: "https://github.com/Nischay-Pro/ha-wpe-screenshot-engine"
 image: "ghcr.io/nischay-pro/ha-wpe-screenshot-engine"
@@ -16,7 +16,6 @@ ports_description:
 options:
   home_assistant_url: "http://homeassistant:8123"
   dashboard_path: "lovelace/energy"
-  expected_text: ""
   render_deadline_seconds: 55
   dashboard_reuse_idle_seconds: 300
   webkit_process_memory_limit_mb: 512
@@ -24,7 +23,7 @@ schema:
   home_assistant_url: str
   home_assistant_token: "password(1,8192)"
   dashboard_path: str
-  expected_text: str
+  expected_text: "str?"
   render_deadline_seconds: int(1,55)
   dashboard_reuse_idle_seconds: int(0,3600)
   webkit_process_memory_limit_mb: int(512,3072)

@@ -108,7 +108,7 @@ Nested Linux namespaces are restricted inside Home Assistant apps, which prevent
 Build the app image and run the HTTP and security regression tests on Ubuntu:
 
 ```sh
-docker build --tag wpe-screenshot-engine:0.1.6 ./wpe_screenshot_engine
+docker build --tag wpe-screenshot-engine:0.1.7 ./wpe_screenshot_engine
 python3 -m unittest discover -s tests -v
 pre-commit install
 pre-commit run --all-files
