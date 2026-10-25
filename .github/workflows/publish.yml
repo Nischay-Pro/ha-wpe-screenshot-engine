@@ -90,19 +90,48 @@ jobs:
           echo "Waiting for successful test and lint runs for ${source_sha}."
           deadline=$((SECONDS + 3300))
           while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&per_page=100")"
-            latest_run_filter="[.workflow_runs[] | select(.name == \$name and .head_sha == \$sha and .event == \$event)]
-              | sort_by([.run_number, .run_attempt])
-              | if length == 0 then empty else .[-1] end"
-            test_run="$(jq -c --arg name 'Test Home Assistant app' --arg sha "${source_sha}" --arg event "${test_event}" \
-              "${latest_run_filter}" <<< "${runs}")"
-            lint_run="$(jq -c --arg name 'Lint' --arg sha "${source_sha}" --arg event "${lint_event}" \
-              "${latest_run_filter}" <<< "${runs}")"
+            test_runs="$(
+              gh run list \
+                --workflow ci.yml \
+                --commit "${source_sha}" \
+                --event "${test_event}" \
+                --limit 100 \
+                --json name,event,status,conclusion,headSha,databaseId
+            )"
+            lint_runs="$(
+              gh run list \
+                --workflow lint.yml \
+                --commit "${source_sha}" \
+                --event "${lint_event}" \
+                --limit 100 \
+                --json name,event,status,conclusion,headSha,databaseId
+            )"
 
-            test_status="$(jq -r '.status // "missing"' <<< "${test_run:-{}}")"
-            test_conclusion="$(jq -r '.conclusion // ""' <<< "${test_run:-{}}")"
-            lint_status="$(jq -r '.status // "missing"' <<< "${lint_run:-{}}")"
-            lint_conclusion="$(jq -r '.conclusion // ""' <<< "${lint_run:-{}}")"
+            workflow_state() {
+              python3 -c '
+          import json
+          import sys
+
+          name, sha, event = sys.argv[1:]
+          runs = json.load(sys.stdin)
+          matching_runs = [
+              run for run in runs
+              if run["name"] == name
+              and run["headSha"] == sha
+              and run["event"] == event
+          ]
+          if not matching_runs:
+              print("missing|")
+          else:
+              latest_run = max(matching_runs, key=lambda run: run["databaseId"])
+              print("{}|{}".format(latest_run["status"], latest_run.get("conclusion") or ""))
+            ' "$1" "$2" "$3"
+            }
+
+            test_state="$(workflow_state 'Test Home Assistant app' "${source_sha}" "${test_event}" <<< "${test_runs}")"
+            lint_state="$(workflow_state 'Lint' "${source_sha}" "${lint_event}" <<< "${lint_runs}")"
+            IFS='|' read -r test_status test_conclusion <<< "${test_state}"
+            IFS='|' read -r lint_status lint_conclusion <<< "${lint_state}"
 
             if [[ "${test_status}" == completed && "${test_conclusion}" != success ]]; then
               echo "::error::Test workflow concluded with ${test_conclusion}."
