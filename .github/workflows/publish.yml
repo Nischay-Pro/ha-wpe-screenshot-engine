@@ -91,12 +91,13 @@ jobs:
           deadline=$((SECONDS + 3300))
           while (( SECONDS < deadline )); do
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&per_page=100")"
+            latest_run_filter='[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .event == $event)]
+              | sort_by([.run_number, .run_attempt])
+              | if length == 0 then empty else .[-1] end'
             test_run="$(jq -c --arg name 'Test Home Assistant app' --arg sha "${source_sha}" --arg event "${test_event}" \
-              '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .event == $event)] \
-              | sort_by([.run_number, .run_attempt]) | if length == 0 then empty else .[-1] end' <<< "${runs}")"
+              "${latest_run_filter}" <<< "${runs}")"
             lint_run="$(jq -c --arg name 'Lint' --arg sha "${source_sha}" --arg event "${lint_event}" \
-              '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .event == $event)] \
-              | sort_by([.run_number, .run_attempt]) | if length == 0 then empty else .[-1] end' <<< "${runs}")"
+              "${latest_run_filter}" <<< "${runs}")"
 
             test_status="$(jq -r '.status // "missing"' <<< "${test_run:-{}}")"
             test_conclusion="$(jq -r '.conclusion // ""' <<< "${test_run:-{}}")"
