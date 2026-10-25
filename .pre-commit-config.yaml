@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: main
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -11,17 +11,17 @@ repos:
       - id: detect-private-key
 
   - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: master
+    rev: v0.11.0
     hooks:
       - id: shellcheck
 
   - repo: https://github.com/rhysd/actionlint
-    rev: main
+    rev: v1.7.12
     hooks:
       - id: actionlint
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: main
+    rev: v0.17.2
     hooks:
       - id: ruff-check
       - id: ruff-format

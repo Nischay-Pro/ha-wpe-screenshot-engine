@@ -59,4 +59,12 @@ The API does not require a second token. Keep it on a trusted network and do not
 
 GitHub Actions tests changes on pushes and pull requests, then publishes `edge` images after successful `main` builds. A nightly run publishes a `nightly` image for testing. To publish an installable app update, increase `version` in `wpe_screenshot_engine/config.yaml`, wait for checks to pass, then publish a GitHub release with the same version as its tag. The build publishes images for `amd64` and `aarch64`; make the GHCR package public after its first publish.
 
-To install the local pre-commit hook, install `pre-commit`, `cppcheck`, `shellcheck`, and `yamllint`, then run `pre-commit install`. Run all hooks manually with `pre-commit run --all-files`.
+On Ubuntu, install the lint tools and enable the local Git hook:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends pre-commit cppcheck shellcheck yamllint
+pre-commit install
+```
+
+Run every hook manually with `pre-commit run --all-files`. To run only the YAML linter, use `pre-commit run yamllint --all-files`.
