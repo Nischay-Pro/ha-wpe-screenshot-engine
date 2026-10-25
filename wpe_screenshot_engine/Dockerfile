@@ -26,7 +26,7 @@ FROM debian:forky-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_ARCH=amd64
-ARG BUILD_VERSION=0.1.3
+ARG BUILD_VERSION=0.1.4
 LABEL io.hass.name="WPE Screenshot Engine" \
       io.hass.description="Private WPE WebKit engine for Home Assistant dashboard screenshots" \
       io.hass.type="app" \
@@ -44,6 +44,7 @@ RUN apt-get update \
       libgles2 \
       libpng16-16t64 \
       libsoup-3.0-0 \
+      util-linux \
       wget \
       libwpewebkit-2.0-1 \
     && rm -rf /var/lib/apt/lists/* \
@@ -65,7 +66,8 @@ COPY run.sh /usr/local/bin/run.sh
 RUN chmod 0555 /usr/local/bin/wpe-screenshot-engine /usr/local/bin/run.sh \
     && chmod 0444 /opt/wpe-engine/fixtures/dashboard.html
 
-USER 10001:10001
+# Home Assistant mounts options.json as root-only; run.sh reads it, then drops to UID 10001.
+USER 0:0
 ENTRYPOINT ["/usr/local/bin/run.sh"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
     CMD ["/usr/bin/wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/readyz"]

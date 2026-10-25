@@ -1421,7 +1421,7 @@ init_app(App *app)
     if (!app->view)
         return FALSE;
 
-    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.1.3", NULL);
+    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.1.4", NULL);
     soup_server_add_early_handler(app->server, NULL, handle_early_request, NULL, NULL);
     soup_server_add_handler(app->server, NULL, handle_request, app, NULL);
     GError *error = NULL;

@@ -23,7 +23,7 @@ import urllib.request
 import uuid
 import zlib
 
-IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.3")
+IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.4")
 ROUTE = "/lovelace/energy"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # These test-only containers run WebKit's nested Bubblewrap sandbox. Docker's
@@ -171,6 +171,10 @@ class _ServiceTests(unittest.TestCase):
             "/tmp:rw,nosuid,size=512m",
             "--cap-drop",
             "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
             *RENDERER_SECURITY_OPTIONS,
             "--security-opt",
             "no-new-privileges:true",
@@ -451,12 +455,135 @@ class _ServiceTests(unittest.TestCase):
     def test_web_process_is_non_root_and_uses_bubblewrap(self) -> None:
         self.assertEqual(
             docker("inspect", "--format", "{{.Config.User}}", IMAGE).stdout.strip(),
-            "10001:10001",
+            "0:0",
         )
-        processes = docker("top", self.name).stdout
+        processes = docker("exec", self.name, "ps", "-eo", "uid,args").stdout
         self.assertIn("/usr/bin/bwrap", processes)
         self.assertIn("WPEWebProcess", processes)
-        self.assertNotRegex(processes, r"(?m)^root\s")
+        renderer_processes = [
+            line
+            for line in processes.splitlines()
+            if any(
+                process in line
+                for process in (
+                    "wpe-screenshot-engine",
+                    "/usr/bin/bwrap",
+                    "WPEWebProcess",
+                )
+            )
+        ]
+        self.assertTrue(renderer_processes, processes)
+        self.assertTrue(
+            all(line.lstrip().startswith("10001 ") for line in renderer_processes),
+            processes,
+        )
+
+    def test_root_owned_home_assistant_options_are_handed_off_safely(self) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        name = f"wpe-options-test-{os.getpid()}"
+        token = "OPTIONS-TOKEN-" + uuid.uuid4().hex
+        options = (
+            '{"home_assistant_url":"http://127.0.0.1:1",'
+            '"home_assistant_token":"' + token + '",'
+            '"dashboard_path":"lovelace/energy",'
+            '"expected_text":"Energy at a glance",'
+            '"render_deadline_seconds":2,'
+            '"dashboard_reuse_idle_seconds":300,'
+            '"webkit_process_memory_limit_mb":512}'
+        )
+        startup = (
+            "printf '%s' '"
+            + options
+            + "' > /data/options.json; chmod 0600 /data/options.json; "
+            + "exec /usr/local/bin/run.sh"
+        )
+        docker(
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            name,
+            "--read-only",
+            "--tmpfs",
+            "/data:rw,nosuid,size=1m",
+            "--tmpfs",
+            "/tmp:rw,nosuid,size=512m",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "CHOWN",
+            *RENDERER_SECURITY_OPTIONS,
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "768m",
+            "--publish",
+            f"127.0.0.1:{port}:8080",
+            "--entrypoint",
+            "/bin/sh",
+            IMAGE,
+            "-c",
+            startup,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    if request_at(port, "/healthz", timeout=1)[0] == 200:
+                        break
+                except (OSError, urllib.error.URLError):
+                    pass
+                time.sleep(0.2)
+            else:
+                logs = docker("logs", name, check=False)
+                self.fail(
+                    "root-owned app options were not accepted:\n"
+                    + logs.stdout
+                    + logs.stderr
+                )
+
+            options_mode = docker(
+                "exec", name, "stat", "-c", "%u:%a", "/data/options.json"
+            ).stdout.strip()
+            self.assertEqual(options_mode, "0:600")
+            token_handoff = (
+                docker(
+                    "exec",
+                    "--user",
+                    "10001:10001",
+                    name,
+                    "/bin/sh",
+                    "-c",
+                    (
+                        "set -- /tmp/wpe-ha-token.*; "
+                        '[ "$#" -eq 1 ] || exit 1; '
+                        '[ -r "$1" ] || exit 2; '
+                        'stat -c \'%u:%g:%a\' "$1"; cat "$1"'
+                    ),
+                )
+                .stdout.strip()
+                .splitlines()
+            )
+            self.assertEqual(token_handoff, ["10001:10001:400", token])
+            processes = docker("exec", name, "ps", "-eo", "uid,args").stdout
+            self.assertNotRegex(processes, r"(?m)^0\s+.*wpe-screenshot-engine")
+            process_status = docker("exec", name, "cat", "/proc/1/status").stdout
+            effective_caps = next(
+                line.split()[1]
+                for line in process_status.splitlines()
+                if line.startswith("CapEff:")
+            )
+            self.assertEqual(effective_caps, "0000000000000000")
+        finally:
+            docker("rm", "--force", name, check=False)
 
     def test_synthetic_ha_token_is_absent_from_errors_and_logs(self) -> None:
         with socket.socket() as probe:
@@ -482,6 +609,12 @@ class _ServiceTests(unittest.TestCase):
                 "/tmp:rw,nosuid,size=512m",
                 "--cap-drop",
                 "ALL",
+                "--cap-add",
+                "SETUID",
+                "--cap-add",
+                "SETGID",
+                "--cap-add",
+                "CHOWN",
                 *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
@@ -546,6 +679,8 @@ class _ServiceTests(unittest.TestCase):
                     result = docker(
                         "run",
                         "--rm",
+                        "--user",
+                        "10001:10001",
                         "--entrypoint",
                         "/usr/local/bin/wpe-screenshot-engine",
                         "--mount",
@@ -568,6 +703,8 @@ class _ServiceTests(unittest.TestCase):
                 "docker",
                 "run",
                 "--rm",
+                "--user",
+                "10001:10001",
                 "--entrypoint",
                 "/bin/sh",
                 "--tmpfs",
@@ -598,6 +735,8 @@ class _ServiceTests(unittest.TestCase):
             result = docker(
                 "run",
                 "--rm",
+                "--user",
+                "10001:10001",
                 "--entrypoint",
                 "/usr/local/bin/wpe-screenshot-engine",
                 "--mount",
@@ -626,6 +765,8 @@ class _ServiceTests(unittest.TestCase):
                 result = docker(
                     "run",
                     "--rm",
+                    "--user",
+                    "10001:10001",
                     "--entrypoint",
                     "/usr/local/bin/wpe-screenshot-engine",
                     "--env",
@@ -656,6 +797,8 @@ class _ServiceTests(unittest.TestCase):
                 result = docker(
                     "run",
                     "--rm",
+                    "--user",
+                    "10001:10001",
                     "--entrypoint",
                     "/usr/local/bin/wpe-screenshot-engine",
                     "--env",
@@ -693,6 +836,10 @@ class _ServiceTests(unittest.TestCase):
                 "/tmp:rw,nosuid,size=512m",
                 "--cap-drop",
                 "ALL",
+                "--cap-add",
+                "SETUID",
+                "--cap-add",
+                "SETGID",
                 *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",
@@ -790,6 +937,10 @@ class _ServiceTests(unittest.TestCase):
                 "/tmp:rw,nosuid,size=512m",
                 "--cap-drop",
                 "ALL",
+                "--cap-add",
+                "SETUID",
+                "--cap-add",
+                "SETGID",
                 *RENDERER_SECURITY_OPTIONS,
                 "--security-opt",
                 "no-new-privileges:true",

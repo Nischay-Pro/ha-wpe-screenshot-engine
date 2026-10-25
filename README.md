@@ -1,70 +1,113 @@
-# Home Assistant App: WPE Screenshot Engine
+# WPE Screenshot Engine
 
-![Supports aarch64 Architecture](https://img.shields.io/badge/aarch64-yes-green.svg)
-![Supports amd64 Architecture](https://img.shields.io/badge/amd64-yes-green.svg)
+<p align="center">
+  <img src="wpe_screenshot_engine/icon.svg" alt="WPE Screenshot Engine icon" width="64">
+</p>
 
-An experimental Home Assistant app that renders one configured dashboard route as a 1280 × 800 PNG using headless WPE WebKit. It provides an HTTP screenshot endpoint for clients such as [Home Assistant MCP](https://github.com/homeassistant-ai/ha-mcp); it does not have a separate web dashboard.
+<p align="center">
+  Headless WebKit screenshots for Home Assistant dashboards.
+</p>
 
-[![Add repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FNischay-Pro%2Fha-wpe-screenshot-engine)
+<p align="center">
+  <img src="https://img.shields.io/badge/amd64-supported-green" alt="amd64 supported">
+  <img src="https://img.shields.io/badge/arm64-supported-green" alt="ARM64 supported">
+</p>
 
-## Install
+<p align="center">
+  <a href="https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FNischay-Pro%2Fha-wpe-screenshot-engine">
+    <img src="https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg" alt="Add repository to Home Assistant">
+  </a>
+</p>
 
-This app requires Home Assistant OS or a Supervised installation with the Apps feature.
+WPE Screenshot Engine renders one configured Home Assistant dashboard route as a 1280 × 800 PNG. It provides a small HTTP API for [Home Assistant MCP](https://github.com/homeassistant-ai/ha-mcp) and other screenshot clients.
 
-1. Select the **Add repository** button above. To add it manually, open **Settings → Apps → Install app → ⋮ → Repositories** and enter `https://github.com/Nischay-Pro/ha-wpe-screenshot-engine`.
+## Features
+
+- Renders dashboards with headless WPE WebKit.
+- Waits for configured dashboard text before returning a screenshot.
+- Reuses the loaded page between captures to reduce rendering time.
+- Supports `amd64` and `arm64` Home Assistant systems with prebuilt images.
+- Restricts capture requests to the configured dashboard route.
+
+## Installation
+
+Requires Home Assistant OS or a Supervised installation with the Apps feature.
+
+1. Select **Add repository** above. To add it manually, go to **Settings → Apps → Install app → ⋮ → Repositories** and enter:
+
+   `https://github.com/Nischay-Pro/ha-wpe-screenshot-engine`
+
 2. Install **WPE Screenshot Engine**.
-3. Configure the app, then start it.
+3. Open its **Configuration** tab and enter the required settings.
+4. Save the configuration and start the app.
 
-## Configure
+Home Assistant downloads the image for your system architecture when you install or update the app.
 
-Open the app's **Configuration** tab. The access token is required.
+## Configuration
 
-| Option | What to enter | Default |
+The Home Assistant access token is required. The app configuration form masks the token field.
+
+| Setting | Description | Default |
 | --- | --- | --- |
-| Home Assistant URL | Base URL reachable from this app, with no path. | `http://homeassistant:8123` |
-| Home Assistant access token | Long-lived token for a dedicated, non-admin Home Assistant user. The field is masked. | — |
-| Home Assistant route | Relative dashboard path, without a leading slash. For example, `lovelace/energy`. | `lovelace/energy` |
-| Readiness text | Text that appears on the dashboard before a screenshot is returned. | `Energy at a glance` |
-| Render deadline | Maximum time allowed for a screenshot, from 1 to 55 seconds. | `55` |
-| Page reuse idle interval | Seconds to keep the dashboard loaded between captures, from 0 to 3600. Set to `0` to reload each time. | `300` |
+| Home Assistant URL | Base HTTP or HTTPS URL reachable from the app, without a path. | `http://homeassistant:8123` |
+| Home Assistant access token | Long-lived token for a dedicated, non-admin Home Assistant user. | Required |
+| Home Assistant route | Dashboard path to capture, without a leading slash. | `lovelace/energy` |
+| Readiness text | Visible dashboard text required before a screenshot is returned. | `Energy at a glance` |
+| Render deadline | Maximum time allowed for one capture, from 1 to 55 seconds. | `55` seconds |
+| Page reuse idle interval | How long to keep the dashboard loaded between captures. Set to `0` to reload for every request. | `300` seconds |
 | WebKit memory target | WebKit process memory pressure target, from 512 to 3072 MiB. | `512` MiB |
 
-Create the token from a dedicated Home Assistant user's profile. Grant only the access that user needs to view the dashboard. The app stores the token in a restricted temporary file and does not write it to its logs.
-
-The app renders the one route configured above. To switch dashboards, change the route and restart the app.
+Create the access token from the dedicated user's Home Assistant profile. Give that user access only to the dashboards it needs to view. The token is stored in the app configuration and passed to the renderer through a private temporary file.
 
 ## Connect Home Assistant MCP
 
-1. Enable the dashboard screenshot feature in your Home Assistant MCP settings.
-2. Set its screenshot engine URL to `http://<app-hostname>:8080`.
+1. Enable dashboard screenshots in Home Assistant MCP.
+2. Set the screenshot engine URL to `http://<app-hostname>:8080`.
 
-Use the WPE Screenshot Engine's internal Home Assistant app hostname. When both apps are installed through Home Assistant, the hostname may include the repository identifier. Do not use `localhost` from the MCP app; that points back to the MCP app itself. The route comes from the WPE app's **Home Assistant route** setting. For Docker-based MCP deployments, set `HAMCP_DASHBOARD_SCREENSHOT_ENGINE_URL` to the same base URL.
+Use the WPE Screenshot Engine's internal Home Assistant app hostname. The exact hostname depends on how the repository was added. Do not use `localhost` from the MCP app; that points to the MCP app itself. The dashboard route is configured in the WPE Screenshot Engine app.
 
-See the [Home Assistant MCP screenshot guide](https://github.com/homeassistant-ai/ha-mcp/blob/master/docs/beta.md) for current feature settings.
+For a Docker-based MCP installation, set `HAMCP_DASHBOARD_SCREENSHOT_ENGINE_URL` to the same URL. See the [Home Assistant MCP screenshot guide](https://github.com/homeassistant-ai/ha-mcp/blob/master/docs/beta.md) for its current setup instructions.
+
+## HTTP API
+
+The screenshot endpoint uses the configured dashboard route. With the default route, a capture request looks like:
+
+```text
+GET http://<app-hostname>:8080/lovelace/energy?viewport=1280x800&zoom=1.0&wait=2500&format=png
+```
+
+Supported query parameters:
+
+| Parameter | Supported value | Default |
+| --- | --- | --- |
+| `viewport` | `1280x800` | — |
+| `zoom` | `1.0` | — |
+| `wait` | `0` to `30000` milliseconds | `2500` |
+| `format` | `png` | — |
+
+The endpoint returns `image/png`. `GET /healthz` checks whether the service is running; `GET /readyz` checks whether the renderer is ready.
 
 ## Network and security
 
-The screenshot API listens on port `8080` inside the app network. Home Assistant does not publish a host port by default. If another device needs direct access, map a host port in the app's **Network** settings.
+The API listens on port `8080` inside the Home Assistant app network. The port is not published on the host by default. If a client outside that network needs access, map a host port in the app's **Network** settings and keep it on a trusted network.
 
-The API does not require a second token. Keep it on a trusted network and do not expose it directly to the internet.
+The screenshot API has no separate authentication. Do not expose it directly to the internet. Use a dedicated, non-admin Home Assistant user for the access token. The renderer runs as an unprivileged app user after startup.
 
 ## Troubleshooting
 
-- **Login page or authorization error:** Check the Home Assistant URL and token. Make sure the token's user can open the configured dashboard.
-- **Dashboard never becomes ready:** Check that the readiness text is visible on the selected route. Update the route or readiness text if needed.
-- **MCP cannot connect:** Confirm the MCP screenshot engine URL uses the WPE app's internal hostname and port `8080`.
-- **Check app health:** `GET /healthz` reports whether the service is running; `GET /readyz` reports whether the renderer is ready.
+- **Startup reports that the HA token file is not readable:** update the app to version `0.1.4` or later.
+- **Login page or authorization error:** check the Home Assistant URL and token, and confirm the token's user can open the configured dashboard.
+- **Dashboard never becomes ready:** check that the readiness text is visible on the selected route. Change the route or readiness text if needed.
+- **MCP cannot connect:** confirm that its screenshot engine URL uses the app's internal hostname and port `8080`.
 
-## For maintainers
+## Development
 
-GitHub Actions tests changes on pushes and pull requests, then publishes `edge` images after successful `main` builds. A nightly run publishes a `nightly` image for testing. To publish an installable app update, increase `version` in `wpe_screenshot_engine/config.yaml`, wait for checks to pass, then publish a GitHub release with the same version as its tag. The build publishes images for `amd64` and `aarch64`; make the GHCR package public after its first publish.
-
-On Ubuntu, install the lint tools and enable the local Git hook:
+Build the app image and run the HTTP and security regression tests on Ubuntu:
 
 ```sh
-sudo apt-get update
-sudo apt-get install --no-install-recommends pre-commit cppcheck shellcheck yamllint
-pre-commit install
+docker build --tag wpe-screenshot-engine:0.1.4 ./wpe_screenshot_engine
+python3 -m unittest discover -s tests -v
+pre-commit run --all-files
 ```
 
-Run every hook manually with `pre-commit run --all-files`. To run only the YAML linter, use `pre-commit run yamllint --all-files`.
+GitHub Actions builds and publishes installable images for `amd64` and `arm64` when a GitHub release is published.

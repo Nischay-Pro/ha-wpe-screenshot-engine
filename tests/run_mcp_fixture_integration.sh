@@ -3,8 +3,8 @@ set -eu
 
 MCP_COMMIT=23f3508a5aa0d0a911140518081ca7be7bc65a3b
 CAPTURE_SHA256=f298cab98dd7615638d699e41a313cc0444c4c7777a4f6b6674d744afe2f206e
-BUILD_IMAGE=wpe-screenshot-engine-build:0.1.3
-ENGINE_IMAGE="${WPE_IMAGE:-wpe-screenshot-engine:0.1.3}"
+BUILD_IMAGE=wpe-screenshot-engine-build:0.1.4
+ENGINE_IMAGE="${WPE_IMAGE:-wpe-screenshot-engine:0.1.4}"
 NETWORK_NAME="wpe-mcp-fixture-$$"
 ENGINE_NAME="wpe-mcp-fixture-$$"
 CAPTURE_SOURCE="/tmp/ha-mcp-capture-pinned-$$.py"
@@ -36,6 +36,7 @@ docker run --detach --init --name "$ENGINE_NAME" \
     --network "$NETWORK_NAME" --network-alias wpe-fixture \
     --read-only --tmpfs /tmp:rw,nosuid,size=512m \
     --cap-drop ALL \
+    --cap-add SETUID --cap-add SETGID \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
     --security-opt systempaths=unconfined \
