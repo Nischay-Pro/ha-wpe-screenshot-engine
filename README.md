@@ -107,6 +107,7 @@ Build the app image and run the HTTP and security regression tests on Ubuntu:
 ```sh
 docker build --tag wpe-screenshot-engine:0.1.4 ./wpe_screenshot_engine
 python3 -m unittest discover -s tests -v
+pre-commit install
 pre-commit run --all-files
 ```
 

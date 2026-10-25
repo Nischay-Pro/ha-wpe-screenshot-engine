@@ -67,6 +67,7 @@ RUN chmod 0555 /usr/local/bin/wpe-screenshot-engine /usr/local/bin/run.sh \
     && chmod 0444 /opt/wpe-engine/fixtures/dashboard.html
 
 # Home Assistant mounts options.json as root-only; run.sh reads it, then drops to UID 10001.
+# hadolint ignore=DL3002
 USER 0:0
 ENTRYPOINT ["/usr/local/bin/run.sh"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \

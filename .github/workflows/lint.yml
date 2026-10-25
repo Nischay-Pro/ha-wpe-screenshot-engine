@@ -27,22 +27,6 @@ jobs:
       - name: Run pre-commit hooks
         uses: pre-commit/action@main
 
-  hadolint:
-    name: Lint Dockerfile
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@main
-        with:
-          persist-credentials: false
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@master
-        with:
-          dockerfile: wpe_screenshot_engine/Dockerfile
-
   home-assistant-config:
     name: Lint Home Assistant app configuration
     runs-on: ubuntu-24.04
