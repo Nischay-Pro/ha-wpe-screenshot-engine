@@ -1,8 +1,12 @@
-name: Publish Home Assistant app image
+name: Publish Home Assistant app images
 
 on:
   release:
     types: [published]
+  workflow_run:
+    workflows: [Test Home Assistant app]
+    types: [completed]
+    branches: [main]
 
 permissions: {}
 
@@ -13,30 +17,74 @@ env:
 
 jobs:
   prepare:
-    name: Prepare release build
+    name: Prepare image build
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+      github.event.workflow_run.event == 'schedule'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      version: ${{ steps.version.outputs.version }}
+      image_tags: ${{ steps.metadata.outputs.image_tags }}
+      skip_existing: ${{ steps.metadata.outputs.skip_existing }}
+      version: ${{ steps.metadata.outputs.version }}
     steps:
-      - name: Check out repository
+      - name: Check out tested source
         uses: actions/checkout@main
         with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.workflow_run.head_sha }}
           persist-credentials: false
 
-      - name: Verify release tag matches app version
-        id: version
+      - name: Set image tags
+        id: metadata
         env:
+          SOURCE_EVENT: ${{ github.event_name == 'release' && 'release' || github.event.workflow_run.event }}
+          SOURCE_SHA: ${{ github.event_name == 'release' && github.sha || github.event.workflow_run.head_sha }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: |
-          version="$(awk -F '"' '/^version:/ { print $2; exit }' wpe_screenshot_engine/config.yaml)"
-          if [[ -z "${version}" || "${version}" != "${RELEASE_TAG}" ]]; then
-            echo "::error::Release tag must exactly match config.yaml version (${version})."
+          app_version="$(awk -F '"' '/^version:/ { print $2; exit }' wpe_screenshot_engine/config.yaml)"
+          if [[ -z "${app_version}" ]]; then
+            echo "::error::Could not read app version from config.yaml."
             exit 1
           fi
+
+          skip_existing=""
+          case "${SOURCE_EVENT}" in
+            release)
+              if [[ "${RELEASE_TAG}" != "${app_version}" ]]; then
+                echo "::error::Release tag must exactly match config.yaml version (${app_version})."
+                exit 1
+              fi
+              version="${app_version}"
+              image_tags="$(printf '%s\nlatest' "${app_version}")"
+              skip_existing="${app_version}"
+              ;;
+            push)
+              version="edge-${SOURCE_SHA:0:12}"
+              image_tags="$(printf 'sha-%s\nedge' "${SOURCE_SHA}")"
+              ;;
+            schedule)
+              version="nightly-$(date -u +%Y%m%d)-${SOURCE_SHA:0:12}"
+              image_tags="$(printf '%s\nnightly' "${version}")"
+              ;;
+            *)
+              echo "::error::Unsupported source event: ${SOURCE_EVENT}"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "image_tags<<EOF"
+            printf '%s\n' "${image_tags}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+          echo "skip_existing=${skip_existing}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Create architecture matrix
@@ -48,7 +96,7 @@ jobs:
           registry-prefix: ${{ env.REGISTRY_PREFIX }}
 
   build:
-    name: Build ${{ matrix.arch }} image
+    name: Build and publish ${{ matrix.arch }} image
     needs: prepare
     runs-on: ${{ matrix.os }}
     permissions:
@@ -59,9 +107,10 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - name: Check out repository
+      - name: Check out tested source
         uses: actions/checkout@main
         with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - name: Build and publish image
@@ -71,11 +120,9 @@ jobs:
           context: wpe_screenshot_engine
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
           image: ${{ matrix.image }}
-          image-tags: |
-            ${{ needs.prepare.outputs.version }}
-            latest
+          image-tags: ${{ needs.prepare.outputs.image_tags }}
           push: "true"
-          skip-existing: ${{ needs.prepare.outputs.version }}
+          skip-existing: ${{ needs.prepare.outputs.skip_existing }}
           version: ${{ needs.prepare.outputs.version }}
 
   manifest:
@@ -92,8 +139,5 @@ jobs:
           architectures: ${{ env.ARCHITECTURES }}
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}
           image-name: ${{ env.IMAGE_NAME }}
-          image-tags: |
-            ${{ needs.prepare.outputs.version }}
-            latest
+          image-tags: ${{ needs.prepare.outputs.image_tags }}
           registry-prefix: ${{ env.REGISTRY_PREFIX }}
-          skip-existing: ${{ needs.prepare.outputs.version }}

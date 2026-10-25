@@ -17,7 +17,7 @@ Renders one configured Home Assistant frontend route as a PNG for screenshot cli
 3. Add `https://github.com/Nischay-Pro/ha-wpe-screenshot-engine`.
 4. Install **WPE Screenshot Engine** from the repository.
 
-The release workflow builds amd64 and aarch64 images on native runners and publishes a multi-architecture image to GitHub Container Registry under both the app version and the moving `latest` tag. Create a GitHub release whose tag matches the app version in `wpe_screenshot_engine/config.yaml` (currently `0.1.3`), and wait for the workflow to finish before installing. After the first release, make the GHCR package public so Home Assistant can pull it. Home Assistant then pulls the image matching the app version and device architecture instead of building it on the HA host.
+After tests pass on `main`, GitHub Actions publishes a multi-architecture `edge` image and an immutable commit-specific image to GitHub Container Registry. A nightly run also publishes a dated image and updates the `nightly` tag. These are for testing; they do not change the version installed by Home Assistant. To publish an installable release, create a GitHub release whose tag exactly matches the app version in `wpe_screenshot_engine/config.yaml` (currently `0.1.3`). That publishes the versioned image and `latest` tag. After the first release, make the GHCR package public so Home Assistant can pull it. Home Assistant pulls the image matching the app version and device architecture instead of building it on the HA host.
 
 ## Configure and connect
 

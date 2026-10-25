@@ -3,6 +3,8 @@ name: Test Home Assistant app
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 4 * * *"
   workflow_dispatch:
 
 permissions: {}
