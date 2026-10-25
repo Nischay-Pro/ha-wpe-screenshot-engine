@@ -1,0 +1,38 @@
+# Merge these demo entities into configuration.yaml for a runnable mock.
+input_boolean:
+  demo_living_room_lights:
+    name: Demo living room lights
+    initial: true
+
+template:
+  - sensor:
+      - name: Demo outdoor temperature
+        unique_id: wpe_mock_outdoor_temperature
+        state: "18.6"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+      - name: Demo energy today
+        unique_id: wpe_mock_energy_today
+        state: "8.4"
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+      - name: Demo living room temperature
+        unique_id: wpe_mock_living_room_temperature
+        state: "21.4"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+      - name: Demo thermostat setpoint
+        unique_id: wpe_mock_thermostat_setpoint
+        state: "20.0"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+      - name: Demo solar power
+        unique_id: wpe_mock_solar_power
+        state: "2150"
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement

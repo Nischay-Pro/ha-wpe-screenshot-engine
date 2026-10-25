@@ -21,6 +21,24 @@
 
 By default, WPE Screenshot Engine renders a requested Home Assistant dashboard route as a 1280 × 800 PNG. Its HTTP API also supports custom viewport sizes and other image formats. It is designed for [Home Assistant MCP](https://github.com/homeassistant-ai/ha-mcp) and other screenshot clients.
 
+## Preview
+
+These screenshots were captured by WPE Screenshot Engine from a disposable Home Assistant instance configured with fictional demo entities and built-in Sections, Tile, and Gauge cards. No screenshots or data from a personal Home Assistant instance are used. The matching Lovelace dashboard and demo entity definitions are in [`tests/fixtures`](tests/fixtures).
+
+<p align="center">
+  <img src="screenshots/mock-lovelace-desktop-light.png" alt="Demo Home dashboard captured from Home Assistant in desktop light mode" width="720">
+</p>
+
+Desktop: [dark](screenshots/mock-lovelace-desktop-dark.png) · [125% zoom](screenshots/mock-lovelace-desktop-zoom-125.png)
+
+Tablet: [landscape light](screenshots/mock-lovelace-tablet-light.png) · [landscape dark](screenshots/mock-lovelace-tablet-dark.png) · [portrait light](screenshots/mock-lovelace-tablet-portrait-light.png)
+
+Mobile: [portrait light](screenshots/mock-lovelace-mobile-light.png) · [portrait dark](screenshots/mock-lovelace-mobile-dark.png) · [landscape](screenshots/mock-lovelace-mobile-landscape-light.png)
+
+Internal page: [Home Assistant Settings](screenshots/mock-home-assistant-settings-light.png)
+
+Dashboard source: [Lovelace YAML](tests/fixtures/mock_lovelace_dashboard.yaml) · [demo entity definitions](tests/fixtures/mock_lovelace_entities.yaml)
+
 ## Features
 
 - Renders dashboards with headless WPE WebKit.

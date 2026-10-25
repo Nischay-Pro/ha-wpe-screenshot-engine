@@ -3,5 +3,4 @@ secrets/
 __pycache__/
 *.py[cod]
 *.log
-screenshots/
 .ruff_cache/

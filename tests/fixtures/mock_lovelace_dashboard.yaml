@@ -1,0 +1,54 @@
+# Illustrative dashboard using built-in Home Assistant cards.
+# The demo template entities are defined in mock_lovelace_entities.yaml.
+views:
+  - title: Demo Home
+    path: demo-home
+    icon: mdi:home
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: At a glance
+            heading_style: title
+          - type: tile
+            entity: sensor.demo_outdoor_temperature
+            name: Outside
+            icon: mdi:thermometer
+          - type: tile
+            entity: input_boolean.demo_living_room_lights
+            name: Living room lights
+            icon: mdi:lightbulb
+          - type: tile
+            entity: sensor.demo_energy_today
+            name: Energy today
+            icon: mdi:lightning-bolt
+      - type: grid
+        cards:
+          - type: heading
+            heading: Living room
+            heading_style: title
+          - type: tile
+            entity: sensor.demo_living_room_temperature
+            name: Room temperature
+            icon: mdi:thermometer
+          - type: tile
+            entity: sensor.demo_thermostat_setpoint
+            name: Thermostat target
+            icon: mdi:thermostat
+      - type: grid
+        cards:
+          - type: heading
+            heading: Energy
+            heading_style: title
+          - type: gauge
+            entity: sensor.demo_solar_power
+            name: Solar power
+            min: 0
+            max: 4000
+            needle: true
+            severity:
+              green: 0
+              yellow: 2500
+              red: 3500
