@@ -50,3 +50,10 @@ repos:
         entry: yamllint
         language: system
         types: [yaml]
+
+      - id: home-assistant-app-linter
+        name: Home Assistant app configuration
+        entry: scripts/lint-home-assistant-app.sh
+        language: system
+        files: ^wpe_screenshot_engine/config\.(json|ya?ml)$
+        pass_filenames: false
