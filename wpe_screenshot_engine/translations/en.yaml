@@ -2,6 +2,11 @@ configuration:
   home_assistant_url:
     name: Home Assistant URL
     description: Base HTTP or HTTPS origin of Home Assistant.
+  home_assistant_ca_certificate:
+    name: Home Assistant CA certificate
+    description: >-
+      Optional path to a PEM CA certificate stored under /ssl. Use this for
+      HTTPS installations that use a private certificate authority.
   home_assistant_token:
     name: Home Assistant access token
     description: >-

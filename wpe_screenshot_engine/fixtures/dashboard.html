@@ -8,9 +8,9 @@
       * { box-sizing: border-box; }
       html, body {
         width: 1280px;
-        height: 800px;
+        min-height: 1200px;
         margin: 0;
-        overflow: hidden;
+        overflow: auto;
         background: #123456;
         color: #ffffff;
         font: 24px/1.35 "DejaVu Sans", sans-serif;
@@ -40,19 +40,227 @@
         height: 120px;
       }
       #fixture-ready { display: block; margin-top: 8px; font-size: 16px; }
+      #options-marker {
+        position: absolute;
+        left: 40px;
+        top: 280px;
+        width: 120px;
+        height: 48px;
+        background: #d02030;
+      }
+      #language-marker {
+        position: absolute;
+        left: 200px;
+        top: 280px;
+        width: 120px;
+        height: 48px;
+        background: #2040d0;
+      }
+      #below-fold {
+        position: absolute;
+        left: 40px;
+        top: 900px;
+        width: 360px;
+        height: 200px;
+        background: #20d050;
+      }
+      #beyond-cap {
+        display: none;
+        position: absolute;
+        left: 40px;
+        top: 4010px;
+        width: 120px;
+        height: 80px;
+        background: #f0d020;
+      }
+      #wait-marker {
+        position: absolute;
+        left: 500px;
+        top: 320px;
+        width: 80px;
+        height: 48px;
+        background: #d02030;
+      }
+      #alignment-pattern {
+        display: none;
+        position: absolute;
+        inset: 0 auto auto 0;
+        width: 1280px;
+        height: 6000px;
+        background: repeating-linear-gradient(
+          to bottom,
+          #123456 0 1px,
+          #f0d020 1px 2px,
+          #20d050 2px 3px,
+          #d02030 3px 4px
+        );
+      }
     </style>
   </head>
   <body>
+    <home-assistant></home-assistant>
     <header>WPE headless rendering fixture</header>
     <main>
+      <div id="below-fold">Below the viewport</div>
+      <div id="options-marker"></div>
+      <div id="language-marker"></div>
+      <div id="wait-marker"></div>
       <section class="card">
         <strong>Plug Power</strong>
         <span id="fixture-ready" data-fixture-ready="false">Loading delayed dashboard data…</span>
       </section>
       <canvas id="chart" width="320" height="120" aria-label="Fixture chart"></canvas>
     </main>
+    <div id="alignment-pattern"></div>
     <script>
+      if (location.pathname.endsWith("/tall")) {
+        document.documentElement.style.minHeight = "4050px";
+        document.body.style.minHeight = "4050px";
+        document.body.style.background =
+          "linear-gradient(to bottom, #123456 3890px, #20d050 3890px, " +
+          "#20d050 3970px, #123456 3970px)";
+        document.querySelector("#beyond-cap").style.display = "block";
+      }
+      if (location.pathname.endsWith("/rounding-short") ||
+          location.pathname.endsWith("/rounding")) {
+        const roundingHeight = location.pathname.endsWith("/rounding-short")
+          ? "1143px"
+          : "1146px";
+        document.documentElement.style.minHeight = roundingHeight;
+        document.body.style.minHeight = roundingHeight;
+        document.querySelector("#below-fold").style.display = "none";
+      }
+      if (location.pathname.endsWith("/fixed-header")) {
+        document.documentElement.style.minHeight = "4050px";
+        document.body.style.minHeight = "4050px";
+        const header = document.querySelector("header");
+        header.style.position = "fixed";
+        header.style.top = "0";
+        header.style.left = "0";
+        header.style.width = "1280px";
+        header.style.zIndex = "1000";
+      }
+      if (location.pathname.endsWith("/inner-scroll")) {
+        document.documentElement.style.minHeight = "800px";
+        document.body.style.minHeight = "800px";
+        document.body.style.overflow = "hidden";
+        const inner = document.createElement("div");
+        inner.style.height = "700px";
+        inner.style.overflowY = "auto";
+        inner.innerHTML = "<div style='height:6000px'>Inner scrolling content</div>";
+        document.body.appendChild(inner);
+      }
+      if (/\/alignment(?:-ref-\d+)?$/.test(location.pathname)) {
+        document.documentElement.style.minHeight = "6000px";
+        document.body.style.minHeight = "6000px";
+        document.querySelector("header").style.display = "none";
+        document.querySelector("main").style.display = "none";
+        document.querySelector("#alignment-pattern").style.display = "block";
+        const referenceOffset = location.pathname.match(/\/alignment-ref-(\d+)$/);
+        if (referenceOffset) {
+          requestAnimationFrame(() => {
+            window.scrollTo(0, Number(referenceOffset[1]) / 0.7);
+          });
+        }
+      }
+      if (location.pathname.endsWith("/about-blank")) {
+        setTimeout(() => { location.href = "about:blank"; }, 10);
+      }
+      if (location.pathname.endsWith("/redirect-root")) {
+        history.replaceState(null, "", "/lovelace/redirect-final");
+      }
+      const fixtureHa = document.querySelector("home-assistant");
+      if (location.pathname.endsWith("/no-ha")) fixtureHa.remove();
+      document.documentElement.dataset.fixtureTheme = "Default";
+      document.documentElement.dataset.fixtureDark = "true";
+      document.documentElement.dataset.fixtureLanguage = "en";
+      document.querySelector("#options-marker").style.background = "#2040d0";
+      fixtureHa.hass = {
+        language: "en",
+        selectedTheme: { theme: "Default", dark: true },
+        connection: {
+          sendMessagePromise(message) {
+            if (message.type === "frontend/set_user_data" && message.key === "theme") {
+              localStorage.setItem("fixture-server-theme", JSON.stringify(message.value));
+            }
+            return Promise.resolve();
+          },
+        },
+      };
+      const storedTheme = localStorage.getItem("fixture-server-theme") ||
+        localStorage.getItem("selectedTheme");
+      if (storedTheme) {
+        const saved = JSON.parse(storedTheme);
+        document.documentElement.dataset.fixtureTheme = saved.theme;
+        document.documentElement.dataset.fixtureDark = String(saved.dark);
+        document.querySelector("#options-marker").style.background =
+          saved.theme === "Graphite E-ink Light" && saved.dark === true
+            ? "#20d050"
+            : saved.theme === "Default" && saved.dark === true
+              ? "#2040d0"
+              : "#d02030";
+      }
+      const storedLanguage = localStorage.getItem("selectedLanguage");
+      if (storedLanguage) {
+        document.documentElement.dataset.fixtureLanguage = storedLanguage;
+        document.querySelector("#language-marker").style.background =
+          storedLanguage === "nl" ? "#20d050" : "#2040d0";
+      }
+      fixtureHa._selectLanguage = (language, saveToBackend) => {
+        fixtureHa.hass.language = language;
+        document.documentElement.lang = language;
+        document.documentElement.dataset.fixtureLanguage = language;
+        localStorage.setItem("selectedLanguage", language);
+        if (saveToBackend) {
+          fixtureHa.hass.connection.sendMessagePromise({
+            type: "frontend/set_user_data",
+            key: "language",
+            value: language,
+          });
+        }
+        document.querySelector("#language-marker").style.background =
+          language === "nl" ? "#20d050" : "#2040d0";
+      };
+      fixtureHa.addEventListener("hass-language-select", event => {
+        fixtureHa._selectLanguage(event.detail, false);
+      });
+      fixtureHa.addEventListener("settheme", event => {
+        if (Object.prototype.hasOwnProperty.call(event.detail, "theme")) {
+          document.documentElement.dataset.fixtureTheme = event.detail.theme;
+        }
+        if (Object.prototype.hasOwnProperty.call(event.detail, "dark")) {
+          document.documentElement.dataset.fixtureDark = String(event.detail.dark);
+        }
+        fixtureHa.hass.selectedTheme = {
+          ...fixtureHa.hass.selectedTheme,
+          ...event.detail,
+        };
+        localStorage.setItem(
+          "selectedTheme",
+          JSON.stringify(fixtureHa.hass.selectedTheme),
+        );
+        fixtureHa.hass.connection.sendMessagePromise({
+          type: "frontend/set_user_data",
+          key: "theme",
+          value: fixtureHa.hass.selectedTheme,
+        });
+        const theme = document.documentElement.dataset.fixtureTheme;
+        const dark = document.documentElement.dataset.fixtureDark;
+        const marker = document.querySelector("#options-marker");
+        marker.style.background = theme === "Graphite E-ink Light" && dark === "true"
+          ? "#20d050"
+          : theme === "Default" && dark === "true"
+            ? "#2040d0"
+            : "#d02030";
+      });
       const ready = document.querySelector("#fixture-ready");
+      if (location.pathname.endsWith("/tall")) {
+        ready.dataset.fixtureReady = "true";
+      }
+      const waitMarker = document.querySelector("#wait-marker");
+      setTimeout(() => {
+        waitMarker.style.background = "#20d050";
+      }, 1000);
       const loadKey = "wpe-fixture-load-count";
       const loadCount = Number(localStorage.getItem(loadKey) || "0") + 1;
       localStorage.setItem(loadKey, String(loadCount));

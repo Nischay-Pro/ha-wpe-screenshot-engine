@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-MCP_COMMIT=23f3508a5aa0d0a911140518081ca7be7bc65a3b
+MCP_COMMIT=40c14c4a3433b3b47b6bb45de1d33db6bff327bf
 CAPTURE_SHA256=f298cab98dd7615638d699e41a313cc0444c4c7777a4f6b6674d744afe2f206e
-BUILD_IMAGE=wpe-screenshot-engine-build:0.1.7
-ENGINE_IMAGE="${WPE_IMAGE:-wpe-screenshot-engine:0.1.7}"
+BUILD_IMAGE=wpe-screenshot-engine-build:0.1.8
+ENGINE_IMAGE="${WPE_IMAGE:-wpe-screenshot-engine:0.1.8}"
 NETWORK_NAME="wpe-mcp-fixture-$$"
 ENGINE_NAME="wpe-mcp-fixture-$$"
 CAPTURE_SOURCE="/tmp/ha-mcp-capture-pinned-$$.py"

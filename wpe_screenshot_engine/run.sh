@@ -11,6 +11,7 @@ APP_GID=10001
 OPTIONS_TOKEN=
 TOKEN_SOURCE=
 TOKEN_TEMP=0
+HA_CA_CERT_FILE="${HA_CA_CERT_FILE:-}"
 OPTIONS_FILE=/data/options.json
 
 # Supervisor normally mounts options before starting an app. Give a fresh
@@ -40,6 +41,7 @@ if [ -e "$OPTIONS_FILE" ]; then
     }
 
     HA_URL="${HA_URL:-$(read_option home_assistant_url)}"
+    HA_CA_CERT_FILE="${HA_CA_CERT_FILE:-$(read_optional_option home_assistant_ca_certificate)}"
     if ! OPTIONS_TOKEN="$(read_option home_assistant_token)"; then
         echo "startup error: set the Home Assistant access token in the app Configuration tab before starting" >&2
         exit 78
@@ -52,6 +54,49 @@ if [ -e "$OPTIONS_FILE" ]; then
 else
     TOKEN_SOURCE="${HA_TOKEN_FILE:-/run/secrets/ha_token}"
 fi
+
+if [ -n "$HA_CA_CERT_FILE" ]; then
+    case "$HA_CA_CERT_FILE" in
+        /ssl/*) ;;
+        *)
+            echo "startup error: Home Assistant CA certificate must be stored under /ssl" >&2
+            exit 78
+            ;;
+    esac
+    if ! HA_CA_CERT_FILE="$(realpath -e -- "$HA_CA_CERT_FILE")"; then
+        echo "startup error: Home Assistant CA certificate path does not exist" >&2
+        exit 78
+    fi
+    case "$HA_CA_CERT_FILE" in
+        /ssl/*) ;;
+        *)
+            echo "startup error: Home Assistant CA certificate must resolve inside /ssl" >&2
+            exit 78
+            ;;
+    esac
+    if [ ! -f "$HA_CA_CERT_FILE" ] || [ -L "$HA_CA_CERT_FILE" ] ||
+       [ ! -r "$HA_CA_CERT_FILE" ]; then
+        echo "startup error: Home Assistant CA certificate must be a readable regular file" >&2
+        exit 78
+    fi
+    cert_bytes=$(wc -c < "$HA_CA_CERT_FILE")
+    if [ "$cert_bytes" -le 0 ] || [ "$cert_bytes" -gt 65536 ]; then
+        echo "startup error: Home Assistant CA certificate must be between 1 and 65536 bytes" >&2
+        exit 78
+    fi
+    if ! openssl x509 -in "$HA_CA_CERT_FILE" -noout >/dev/null 2>&1; then
+        echo "startup error: Home Assistant CA certificate is not a valid PEM certificate" >&2
+        exit 78
+    fi
+    install -m 0644 "$HA_CA_CERT_FILE" \
+        /usr/local/share/ca-certificates/home-assistant-private-ca.crt
+    if ! update-ca-certificates >/dev/null; then
+        echo "startup error: unable to add the Home Assistant CA certificate to the trust store" >&2
+        exit 78
+    fi
+    printf '%s\n' "startup: custom Home Assistant CA certificate installed"
+fi
+unset HA_CA_CERT_FILE
 
 export HA_URL="${HA_URL:-http://homeassistant:8123}"
 export DASHBOARD_PATH="${DASHBOARD_PATH:-lovelace/energy}"
