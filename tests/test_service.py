@@ -23,7 +23,7 @@ import urllib.request
 import uuid
 import zlib
 
-IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.5")
+IMAGE = os.environ.get("WPE_IMAGE", "wpe-screenshot-engine:0.1.6")
 ROUTE = "/lovelace/energy"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -315,6 +315,12 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(pixel(pixels, width, 500, 130), (32, 208, 80, 255))
         self.assertEqual(pixel(pixels, width, 510, 150), (240, 208, 32, 255))
 
+    def test_capture_accepts_a_different_dashboard_and_view_path(self) -> None:
+        status, headers, body = request("/laundry-dashboard/laundry?wait=0")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "image/png")
+        self.assertEqual(decode_rgba_png(body)[:2], (1280, 800))
+
     def test_successive_captures_reuse_the_loaded_dashboard_page(self) -> None:
         images = []
         for _ in range(2):
@@ -339,9 +345,8 @@ class _ServiceTests(unittest.TestCase):
 
     def test_bad_paths_and_query_inputs_fail_without_images(self) -> None:
         cases = (
-            ("/other", 403),
             ("/" + "a" * 257, 400),
-            ("/lovelace/%2e%2e/energy", 403),
+            ("/lovelace/%2F%2Fevil", 400),
             (ROUTE + "%00suffix", 400),
             (ROUTE + "?viewport=4096xauto", 422),
             (ROUTE + "?format=jpeg", 422),
@@ -377,7 +382,9 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(status, 405)
         self.assertEqual(headers.get("Allow"), "GET")
 
-    def test_randomized_request_targets_do_not_crash_or_return_images(self) -> None:
+    def test_randomized_request_targets_do_not_crash_or_bypass_path_validation(
+        self,
+    ) -> None:
         generator = random.Random(0x5745)
         alphabet = string.ascii_letters + string.digits + "%.-_/"
         for index in range(80):
@@ -396,10 +403,52 @@ class _ServiceTests(unittest.TestCase):
                 ]
                 path = "/" + "/".join(pieces)
             with self.subTest(case=index):
-                status, headers, body = request(path, timeout=5)
-                self.assertIn(status, (400, 403))
-                self.assertNotEqual(headers.get_content_type(), "image/png")
-                self.assertLessEqual(len(body), 128)
+                route = path.split("?", 1)[0]
+                segments = route[1:].split("/") if route.startswith("/") else []
+                safe_route = (
+                    len(route) <= 257
+                    and bool(segments)
+                    and all(
+                        segment not in ("", ".", "..")
+                        and all(
+                            character.isascii()
+                            and (character.isalnum() or character in "._-")
+                            for character in segment
+                        )
+                        for segment in segments
+                    )
+                )
+                request_path = path
+                if (
+                    safe_route
+                    and "?" not in path
+                    and route
+                    not in (
+                        "/healthz",
+                        "/readyz",
+                    )
+                ):
+                    separator = "&" if "?" in path else "?"
+                    request_path += f"{separator}wait=0"
+                status, headers, body = request(request_path, timeout=5)
+                if (
+                    safe_route
+                    and "?" not in path
+                    and route
+                    not in (
+                        "/healthz",
+                        "/readyz",
+                    )
+                ):
+                    self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+                    self.assertEqual(headers.get_content_type(), "image/png")
+                elif route in ("/healthz", "/readyz"):
+                    self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+                    self.assertEqual(headers.get_content_type(), "text/plain")
+                else:
+                    self.assertEqual(status, 400, body.decode("utf-8", "replace"))
+                    self.assertNotEqual(headers.get_content_type(), "image/png")
+                    self.assertLessEqual(len(body), 128)
 
         self.assertEqual(request("/healthz")[0], 200)
 
@@ -418,6 +467,47 @@ class _ServiceTests(unittest.TestCase):
         worker.join(timeout=5)
         self.assertFalse(worker.is_alive())
         self.assertEqual(result[0][0], 200)
+
+    def test_disconnected_capture_releases_renderer(self) -> None:
+        existing_logs = docker("logs", self.name, check=False)
+        started_count = (existing_logs.stdout + existing_logs.stderr).count(
+            "Screenshot started:"
+        )
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as client:
+            client.sendall(
+                b"GET /lovelace/energy?wait=30000 HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                logs = docker("logs", self.name, check=False)
+                if (logs.stdout + logs.stderr).count(
+                    "Screenshot started:"
+                ) > started_count:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("the server did not begin the disconnected capture")
+            client.shutdown(socket.SHUT_RDWR)
+
+        deadline = time.monotonic() + 1.5
+        status = 503
+        while time.monotonic() < deadline:
+            status, headers, body = request("/laundry-dashboard/laundry?wait=0")
+            if status == 200:
+                self.assertEqual(headers.get_content_type(), "image/png")
+                self.assertEqual(decode_rgba_png(body)[:2], (1280, 800))
+                return
+            self.assertEqual(status, 503, body.decode("utf-8", "replace"))
+            time.sleep(0.05)
+
+        logs = docker("logs", self.name, check=False)
+        self.fail(
+            f"disconnected client left the renderer busy: status={status}\n"
+            + logs.stdout
+            + logs.stderr
+        )
 
     def test_deadline_resets_view_and_next_capture_succeeds(self) -> None:
         for attempt in range(3):
@@ -585,6 +675,101 @@ class _ServiceTests(unittest.TestCase):
             ).stdout
             self.assertNotIn("HA_TOKEN_FILE=", renderer_environment)
             self.assertNotIn(token, renderer_environment)
+        finally:
+            docker("rm", "--force", name, check=False)
+
+    def test_startup_waits_for_supervisor_options_on_initial_launch(self) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        name = f"wpe-options-mount-test-{os.getpid()}"
+        docker(
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            name,
+            "--read-only",
+            "--tmpfs",
+            "/data:rw,nosuid,size=1m",
+            "--tmpfs",
+            "/tmp:rw,nosuid,size=512m",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "CHOWN",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "768m",
+            "--publish",
+            f"127.0.0.1:{port}:8080",
+            "--env",
+            "WPE_FIXTURE_MODE=1",
+            "--env",
+            "HA_URL=http://fixture.local",
+            IMAGE,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            logs = ""
+            while time.monotonic() < deadline:
+                result = docker("logs", name, check=False)
+                logs = result.stdout + result.stderr
+                if "waiting up to 10 seconds for Supervisor app options" in logs:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail(f"startup did not wait for app options:\n{logs}")
+
+            options = (
+                '{"home_assistant_url":"http://fixture.local",'
+                '"home_assistant_token":"fixture-token",'
+                '"dashboard_path":"lovelace/energy",'
+                '"expected_text":"",'
+                '"render_deadline_seconds":2,'
+                '"dashboard_reuse_idle_seconds":300,'
+                '"webkit_process_memory_limit_mb":512}'
+            )
+            docker(
+                "exec",
+                name,
+                "/bin/sh",
+                "-c",
+                "printf '%s' '" + options + "' > /data/options.json; "
+                "chmod 0600 /data/options.json",
+            )
+
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    if request_at(port, "/readyz", timeout=1)[0] == 200:
+                        break
+                except (OSError, urllib.error.URLError):
+                    pass
+                time.sleep(0.2)
+            else:
+                result = docker("logs", name, check=False)
+                self.fail(
+                    "app did not start after Supervisor options appeared:\n"
+                    + result.stdout
+                    + result.stderr
+                )
+
+            result = docker("logs", name, check=False)
+            logs = result.stdout + result.stderr
+            self.assertIn("Supervisor app options loaded", logs)
+            self.assertIn("Screenshot API ready", logs)
+            self.assertNotIn("startup error:", logs)
+            status, headers, body = request_at(port, ROUTE + "?wait=0", timeout=8)
+            self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+            self.assertEqual(headers.get_content_type(), "image/png")
         finally:
             docker("rm", "--force", name, check=False)
 
@@ -988,7 +1173,7 @@ class _ServiceTests(unittest.TestCase):
                 status, _, body = request_at(port, ROUTE + "?wait=0", timeout=8)
                 self.assertEqual(status, 502, body.decode("utf-8", "replace"))
                 self.assertIn(
-                    b"navigation outside the allowed dashboard was blocked", body
+                    b"navigation outside the configured origin was blocked", body
                 )
             finally:
                 docker("rm", "--force", name, check=False)

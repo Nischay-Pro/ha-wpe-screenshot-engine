@@ -11,24 +11,41 @@ APP_GID=10001
 OPTIONS_TOKEN=
 TOKEN_SOURCE=
 TOKEN_TEMP=0
+OPTIONS_FILE=/data/options.json
 
-if [ -e /data/options.json ]; then
-    if [ ! -r /data/options.json ]; then
+# Supervisor normally mounts options before starting an app. Give a fresh
+# installation a short grace period for that mount before checking the legacy
+# token-file path, which otherwise produces a misleading first-start failure.
+if [ -d /data ] && [ ! -e "$OPTIONS_FILE" ]; then
+    printf '%s\n' "startup: waiting up to 10 seconds for Supervisor app options"
+    attempts=0
+    while [ ! -e "$OPTIONS_FILE" ] && [ "$attempts" -lt 50 ]; do
+        sleep 0.2
+        attempts=$((attempts + 1))
+    done
+fi
+
+if [ -e "$OPTIONS_FILE" ]; then
+    if [ ! -r "$OPTIONS_FILE" ]; then
         echo "startup error: Home Assistant app settings are not readable" >&2
         exit 78
     fi
+    printf '%s\n' "startup: Supervisor app options loaded"
 
     read_option() {
-        jq -er --arg key "$1" '.[$key] // empty' /data/options.json
+        jq -er --arg key "$1" '.[$key] // empty' "$OPTIONS_FILE" 2>/dev/null
+    }
+    read_optional_option() {
+        jq -r --arg key "$1" '.[$key] // ""' "$OPTIONS_FILE" 2>/dev/null
     }
 
     HA_URL="${HA_URL:-$(read_option home_assistant_url)}"
     if ! OPTIONS_TOKEN="$(read_option home_assistant_token)"; then
-        echo "startup error: enter the Home Assistant access token in the app Configuration tab" >&2
+        echo "startup error: set the Home Assistant access token in the app Configuration tab before starting" >&2
         exit 78
     fi
     DASHBOARD_PATH="${DASHBOARD_PATH:-$(read_option dashboard_path)}"
-    EXPECTED_TEXT="${EXPECTED_TEXT:-$(read_option expected_text)}"
+    EXPECTED_TEXT="${EXPECTED_TEXT-$(read_optional_option expected_text)}"
     RENDER_DEADLINE_SECONDS="${RENDER_DEADLINE_SECONDS:-$(read_option render_deadline_seconds)}"
     DASHBOARD_REUSE_IDLE_SECONDS="${DASHBOARD_REUSE_IDLE_SECONDS:-$(read_option dashboard_reuse_idle_seconds)}"
     WEBKIT_PROCESS_MEMORY_LIMIT_MB="${WEBKIT_PROCESS_MEMORY_LIMIT_MB:-$(read_option webkit_process_memory_limit_mb)}"
@@ -38,7 +55,7 @@ fi
 
 export HA_URL="${HA_URL:-http://homeassistant:8123}"
 export DASHBOARD_PATH="${DASHBOARD_PATH:-lovelace/energy}"
-export EXPECTED_TEXT="${EXPECTED_TEXT:-Energy at a glance}"
+export EXPECTED_TEXT="${EXPECTED_TEXT-}"
 export RENDER_DEADLINE_SECONDS="${RENDER_DEADLINE_SECONDS:-55}"
 export DASHBOARD_REUSE_IDLE_SECONDS="${DASHBOARD_REUSE_IDLE_SECONDS:-300}"
 export WEBKIT_PROCESS_MEMORY_LIMIT_MB="${WEBKIT_PROCESS_MEMORY_LIMIT_MB:-512}"
@@ -52,7 +69,7 @@ if [ "${WPE_FIXTURE_MODE:-0}" != "1" ]; then
         TOKEN_TEMP=1
     else
         if [ ! -r "$TOKEN_SOURCE" ]; then
-            echo "startup error: HA token file is not readable by the app user" >&2
+            echo "startup error: no Home Assistant access token is available; configure the app token or mount a readable HA_TOKEN_FILE" >&2
             exit 78
         fi
         if [ ! -f "$TOKEN_SOURCE" ] || [ -L "$TOKEN_SOURCE" ]; then
@@ -75,6 +92,7 @@ else
     unset OPTIONS_TOKEN TOKEN_SOURCE
 fi
 export HA_TOKEN_FILE
+printf '%s\n' "startup: starting WPE renderer as UID ${APP_UID}"
 
 # Expand HOME and XDG_CACHE_HOME after dropping privileges.
 # shellcheck disable=SC2016

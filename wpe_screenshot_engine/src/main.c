@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -52,9 +53,12 @@ struct _RenderRequest {
     guint timeout_source;
     guint readiness_source;
     guint wait_source;
+    guint disconnect_source;
+    gulong message_disconnected_handler;
     gboolean readiness_pending;
     gboolean finished;
     guint wait_ms;
+    gint64 started_at_us;
     gchar *path;
 };
 
@@ -82,10 +86,9 @@ struct _App {
     guint fixture_first_delay_ms;
     gchar *ha_url;
     gchar *ha_origin;
-    gchar *ha_path;
     gchar *token_file;
     gchar *token;
-    gchar *allowed_path;
+    gchar *readiness_path;
     gchar *expected_text;
     gchar *fixture_html_path;
 };
@@ -96,10 +99,13 @@ typedef struct {
 
 static RenderRequest *request_ref(RenderRequest *request);
 static void request_unref(RenderRequest *request);
+static void disconnect_message_disconnected_handler(RenderRequest *request);
+static void cancel_disconnected_request(RenderRequest *request);
 static void app_recreate_view(App *app);
 static gboolean current_request(RenderRequest *request);
-static gboolean is_configured_dashboard_uri(App *app, const gchar *candidate);
-static gboolean path_is_allowed_or_auth(App *app, const gchar *uri_text);
+static gboolean is_dashboard_uri(App *app, const gchar *candidate,
+                                 const gchar *dashboard_path);
+static gboolean is_same_origin_uri(App *app, const gchar *uri_text);
 static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer user_data);
 static void on_uri_changed(WebKitWebView *view, GParamSpec *property, gpointer user_data);
 static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event,
@@ -111,6 +117,8 @@ static void on_web_process_terminated(WebKitWebView *view,
                                      WebKitWebProcessTerminationReason reason,
                                      gpointer user_data);
 static void on_snapshot_ready(GObject *source, GAsyncResult *result, gpointer user_data);
+static void on_message_disconnected(SoupServerMessage *message, gpointer user_data);
+static gboolean check_client_connection(gpointer user_data);
 
 static gboolean
 env_truthy(const gchar *name)
@@ -321,7 +329,7 @@ load_runtime_config(App *app)
 {
     GError *error = NULL;
     const gchar *ha_url = g_getenv("HA_URL");
-    const gchar *allowed_path = g_getenv("DASHBOARD_PATH");
+    const gchar *readiness_path = g_getenv("DASHBOARD_PATH");
     const gchar *expected_text = g_getenv("EXPECTED_TEXT");
     const gchar *token_file = g_getenv("HA_TOKEN_FILE");
     const gchar *fixture_path = g_getenv("FIXTURE_HTML_PATH");
@@ -341,16 +349,15 @@ load_runtime_config(App *app)
         return FALSE;
     }
 
-    const gchar *configured_path = allowed_path && *allowed_path ?
-        allowed_path : "lovelace/energy";
+    const gchar *configured_path = readiness_path && *readiness_path ?
+        readiness_path : "lovelace/energy";
     if (!valid_dashboard_path(configured_path)) {
-        g_printerr("configuration error: DASHBOARD_PATH is not a safe dashboard route\n");
+        g_printerr("configuration error: DASHBOARD_PATH is not a safe relative dashboard route\n");
         return FALSE;
     }
-    app->allowed_path = g_strdup(configured_path);
-    app->ha_path = g_strdup_printf("/%s", app->allowed_path);
+    app->readiness_path = g_strdup(configured_path);
     const gchar *configured_expected_text = expected_text && *expected_text ?
-        expected_text : "Energy at a glance";
+        expected_text : "";
     gsize expected_text_length = strnlen(
         configured_expected_text, MAX_EXPECTED_TEXT_BYTES + 1u);
     if (expected_text_length > MAX_EXPECTED_TEXT_BYTES ||
@@ -447,6 +454,19 @@ request_unref(RenderRequest *request)
     g_free(request);
 }
 
+static void
+disconnect_message_disconnected_handler(RenderRequest *request)
+{
+    if (!request->message_disconnected_handler)
+        return;
+
+    gulong handler = request->message_disconnected_handler;
+    request->message_disconnected_handler = 0;
+    if (g_signal_handler_is_connected(request->message, handler))
+        g_signal_handler_disconnect(request->message, handler);
+    request_unref(request);
+}
+
 static gboolean
 current_request(RenderRequest *request)
 {
@@ -534,23 +554,38 @@ request_finish(RenderRequest *request, guint status, const gchar *text,
     if (request->finished)
         return;
     request->finished = TRUE;
+    disconnect_message_disconnected_handler(request);
     remove_source(&request->timeout_source);
     remove_source(&request->readiness_source);
     remove_source(&request->wait_source);
+    remove_source(&request->disconnect_source);
     g_cancellable_cancel(request->cancellable);
 
     if (image && status == 200) {
-        app->dashboard_loaded = is_configured_dashboard_uri(
-            app, webkit_web_view_get_uri(app->view));
+        app->dashboard_loaded = is_dashboard_uri(
+            app, webkit_web_view_get_uri(app->view), request->path);
         app->dashboard_last_capture_at_us = app->dashboard_loaded ?
             g_get_monotonic_time() : 0;
         gsize length = 0;
         const gchar *bytes = g_bytes_get_data(image, &length);
+        gint64 elapsed_us = g_get_monotonic_time() - request->started_at_us;
+        guint64 elapsed_ms = elapsed_us > 0 ? (guint64) elapsed_us / 1000u : 0;
+        g_message("Screenshot complete: request_id=%llu route=/%s status=200 elapsed_ms=%llu"
+                  " image_bytes=%zu", (unsigned long long) request->id,
+                  request->path, (unsigned long long) elapsed_ms, length);
         soup_server_message_set_status(request->message, 200, NULL);
         soup_server_message_set_response(request->message, "image/png", SOUP_MEMORY_COPY,
                                          bytes, length);
         set_response_headers(request->message, "image/png", "no-store", length);
     } else {
+        gint64 elapsed_us = g_get_monotonic_time() - request->started_at_us;
+        guint64 elapsed_ms = elapsed_us > 0 ? (guint64) elapsed_us / 1000u : 0;
+        gchar *reason = g_strdup(text ? text : "unspecified renderer error");
+        g_strchomp(reason);
+        g_warning("Screenshot failed: request_id=%llu route=/%s status=%u elapsed_ms=%llu"
+                  " reason=%s", (unsigned long long) request->id, request->path,
+                  status, (unsigned long long) elapsed_ms, reason);
+        g_free(reason);
         respond_error(request->message, status, text);
     }
 
@@ -562,6 +597,66 @@ request_finish(RenderRequest *request, guint status, const gchar *text,
     soup_server_message_unpause(request->message);
     if (owns_active)
         request_unref(request);
+}
+
+static void
+cancel_disconnected_request(RenderRequest *request)
+{
+    App *app = request->app;
+    if (request->finished || app->active != request)
+        return;
+
+    gint64 elapsed_us = g_get_monotonic_time() - request->started_at_us;
+    guint64 elapsed_ms = elapsed_us > 0 ? (guint64) elapsed_us / 1000u : 0;
+    g_message("Screenshot client disconnected: request_id=%llu route=/%s elapsed_ms=%llu",
+              (unsigned long long) request->id, request->path,
+              (unsigned long long) elapsed_ms);
+
+    request->finished = TRUE;
+    disconnect_message_disconnected_handler(request);
+    remove_source(&request->timeout_source);
+    remove_source(&request->readiness_source);
+    remove_source(&request->wait_source);
+    remove_source(&request->disconnect_source);
+    g_cancellable_cancel(request->cancellable);
+    app->active = NULL;
+    app_recreate_view(app);
+    request_unref(request); /* Release the app->active reference. */
+}
+
+static void
+on_message_disconnected(SoupServerMessage *message, gpointer user_data)
+{
+    (void) message;
+    RenderRequest *request = request_ref(user_data);
+    cancel_disconnected_request(request);
+    request_unref(request); /* Release the temporary callback reference. */
+}
+
+static gboolean
+check_client_connection(gpointer user_data)
+{
+    RenderRequest *request = user_data;
+    if (!current_request(request)) {
+        request->disconnect_source = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    GSocket *socket = soup_server_message_get_socket(request->message);
+    gint socket_fd = socket ? g_socket_get_fd(socket) : -1;
+    if (socket_fd < 0)
+        return G_SOURCE_CONTINUE;
+
+    gchar byte;
+    ssize_t received = recv(socket_fd, &byte, sizeof(byte), MSG_PEEK | MSG_DONTWAIT);
+    if (received == 0 ||
+        (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+        request->disconnect_source = 0;
+        cancel_disconnected_request(request);
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
 }
 
 static guint
@@ -583,9 +678,9 @@ same_origin(App *app, const gchar *candidate)
 }
 
 static gboolean
-is_configured_dashboard_uri(App *app, const gchar *candidate)
+is_dashboard_uri(App *app, const gchar *candidate, const gchar *dashboard_path)
 {
-    if (!candidate || !same_origin(app, candidate))
+    if (!candidate || !dashboard_path || !same_origin(app, candidate))
         return FALSE;
 
     GError *error = NULL;
@@ -594,13 +689,15 @@ is_configured_dashboard_uri(App *app, const gchar *candidate)
     if (!uri)
         return FALSE;
 
-    gboolean matches = !g_strcmp0(g_uri_get_path(uri), app->ha_path);
+    const gchar *uri_path = g_uri_get_path(uri);
+    gboolean matches = uri_path && uri_path[0] == '/' &&
+        !g_strcmp0(uri_path + 1, dashboard_path);
     g_uri_unref(uri);
     return matches;
 }
 
 static gboolean
-dashboard_page_can_be_reused(App *app)
+dashboard_page_can_be_reused(App *app, const gchar *requested_path)
 {
     if (!app->dashboard_loaded || !app->dashboard_reuse_idle_seconds ||
         app->dashboard_last_capture_at_us <= 0)
@@ -611,7 +708,7 @@ dashboard_page_can_be_reused(App *app)
         (gint64) app->dashboard_reuse_idle_seconds * G_USEC_PER_SEC)
         return FALSE;
 
-    return is_configured_dashboard_uri(app, webkit_web_view_get_uri(app->view));
+    return is_dashboard_uri(app, webkit_web_view_get_uri(app->view), requested_path);
 }
 
 static gchar *
@@ -633,22 +730,12 @@ auth_bootstrap_script(App *app)
 }
 
 static gboolean
-path_is_allowed_or_auth(App *app, const gchar *uri_text)
+is_same_origin_uri(App *app, const gchar *uri_text)
 {
     if (!uri_text || strnlen(uri_text, MAX_HA_URI_BYTES + 1u) > MAX_HA_URI_BYTES)
         return FALSE;
 
-    GError *error = NULL;
-    GUri *uri = g_uri_parse(uri_text, G_URI_FLAGS_NONE, &error);
-    g_clear_error(&error);
-    if (!uri)
-        return FALSE;
-    gboolean same = same_origin(app, uri_text);
-    const gchar *path = g_uri_get_path(uri);
-    gboolean allowed_path = path &&
-        (!g_strcmp0(path, app->ha_path) || !g_strcmp0(path, "/auth/authorize"));
-    g_uri_unref(uri);
-    return same && allowed_path;
+    return same_origin(app, uri_text);
 }
 
 static gboolean
@@ -671,11 +758,11 @@ on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
         WebKitURIRequest *request = navigation ?
             webkit_navigation_action_get_request(navigation) : NULL;
         const gchar *uri = request ? webkit_uri_request_get_uri(request) : NULL;
-        if (!uri || !path_is_allowed_or_auth(app, uri)) {
+        if (!uri || !is_same_origin_uri(app, uri)) {
             webkit_policy_decision_ignore(decision);
             if (view == app->view && app->active)
                 request_finish(app->active, 502,
-                               "Home Assistant navigation outside the allowed dashboard was blocked.\n",
+                               "Home Assistant navigation outside the configured origin was blocked.\n",
                                NULL, TRUE);
             return TRUE;
         }
@@ -804,15 +891,18 @@ fixture_load(App *app, RenderRequest *request)
     g_string_append_len(replaced, cursor, (gssize) (end - cursor));
     g_free(html);
     g_free(delay_text);
-    webkit_web_view_load_html(app->view, replaced->str, "http://fixture.local/lovelace/energy");
+    gchar *base_uri = g_strdup_printf("%s/%s", app->ha_url, request->path);
+    webkit_web_view_load_html(app->view, replaced->str, base_uri);
+    g_free(base_uri);
     g_string_free(replaced, TRUE);
     return TRUE;
 }
 
 static gboolean
-ready_script(App *app, gchar **script_out)
+ready_script(App *app, RenderRequest *request, gchar **script_out)
 {
-    gchar *expected = js_quote(app->expected_text);
+    const gchar *expected_text = !g_strcmp0(request->path, app->readiness_path) ?
+        app->expected_text : "";
     const gchar *fixture = app->fixture_mode ?
         "if(!document.querySelector('[data-fixture-ready=true]'))return 'wait';" :
         "if(location.pathname.indexOf('/auth/authorize')===0)return 'auth';"
@@ -821,13 +911,23 @@ ready_script(App *app, gchar **script_out)
         "const resolver=main&&main.shadowRoot&&main.shadowRoot.querySelector('partial-panel-resolver');"
         "if(!resolver||resolver._loading)return 'wait';const panel=resolver.children[0];"
         "if(!panel||('_loading'in panel&&panel._loading))return 'wait';";
+    if (!expected_text[0]) {
+        *script_out = g_strdup_printf(
+            "(()=>{%sif(document.fonts&&document.fonts.status!=='loaded')return 'wait';"
+            "return 'ready';})()",
+            fixture);
+        return TRUE;
+    }
+
+    gchar *expected = js_quote(expected_text);
     *script_out = g_strdup_printf(
         "(()=>{%sif(document.fonts&&document.fonts.status!=='loaded')return 'wait';"
         "let text='';const walk=root=>{if(!root)return;text+=' '+(root.textContent||'');"
         "for(const e of root.querySelectorAll('*'))if(e.shadowRoot)walk(e.shadowRoot);};"
-        "walk(document.body);return text.toLocaleLowerCase().includes(%s.toLocaleLowerCase())?'ready':'wait';})()",
+        "walk(document.body);return text.toLocaleLowerCase().includes(%s.toLocaleLowerCase())?"
+        "'ready':'wait';})()",
         fixture, expected);
-    g_free(expected);
+    secure_free_string(expected);
     return TRUE;
 }
 
@@ -892,7 +992,7 @@ readiness_tick(gpointer user_data)
         return G_SOURCE_CONTINUE;
 
     gchar *script = NULL;
-    ready_script(request->app, &script);
+    ready_script(request->app, request, &script);
     request->readiness_pending = TRUE;
     webkit_web_view_evaluate_javascript(request->app->view, script, -1, NULL, NULL,
                                         request->cancellable, on_readiness_result,
@@ -1091,9 +1191,9 @@ on_uri_changed(WebKitWebView *view, GParamSpec *property, gpointer user_data)
         return;
 
     const gchar *uri = webkit_web_view_get_uri(view);
-    if (uri && !path_is_allowed_or_auth(app, uri))
+    if (uri && !is_same_origin_uri(app, uri))
         request_finish(app->active, 502,
-                       "Home Assistant redirected outside the allowed dashboard.\n",
+                       "Home Assistant redirected outside the configured origin.\n",
                        NULL, TRUE);
 }
 
@@ -1344,12 +1444,15 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
         soup_message_headers_replace(soup_server_message_get_response_headers(message), "Allow", "GET");
         return;
     }
-    gchar *expected_path = g_strdup_printf("/%s", app->allowed_path);
-    gboolean exact_path = raw_path && !strcmp(raw_path, expected_path) &&
-                          path && !strcmp(path, expected_path);
-    g_free(expected_path);
-    if (!exact_path) {
-        respond_error(message, 403, "Dashboard path is not allowed.\n");
+    gsize request_path_length = path ?
+        strnlen(path, MAX_DASHBOARD_PATH_BYTES + 2u) : 0;
+    gboolean valid_route = raw_path && path && raw_path[0] == '/' &&
+        request_path_length > 1u &&
+        request_path_length <= MAX_DASHBOARD_PATH_BYTES + 1u &&
+        !strcmp(raw_path, path) && valid_dashboard_path(path + 1);
+    if (!valid_route) {
+        respond_error(message, 400,
+                      "Dashboard path must be a safe relative Home Assistant route.\n");
         return;
     }
     if (!app->renderer_ready || !app->view) {
@@ -1379,13 +1482,21 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
     request->id = ++app->next_request_id;
     request->view_generation = app->view_generation;
     request->wait_ms = options.wait_ms;
-    request->path = g_strdup(app->allowed_path);
+    request->started_at_us = g_get_monotonic_time();
+    request->path = g_strdup(path + 1);
     app->active = request;
+    request->message_disconnected_handler = g_signal_connect(
+        message, "disconnected", G_CALLBACK(on_message_disconnected), request_ref(request));
+    request->disconnect_source = add_request_timeout(100, check_client_connection,
+                                                      request);
+    g_message("Screenshot started: request_id=%llu route=/%s deadline_ms=%u",
+              (unsigned long long) request->id, request->path,
+              app->render_deadline_ms);
     soup_server_message_pause(message);
     request->timeout_source = add_request_timeout(app->render_deadline_ms,
                                                    render_deadline, request);
 
-    if (dashboard_page_can_be_reused(app)) {
+    if (dashboard_page_can_be_reused(app, request->path)) {
         start_readiness_checks(request);
         return;
     }
@@ -1397,7 +1508,7 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
         if (!fixture_load(app, request))
             return;
     } else {
-        gchar *uri_to_load = g_strdup_printf("%s%s", app->ha_url, app->ha_path);
+        gchar *uri_to_load = g_strdup_printf("%s/%s", app->ha_url, request->path);
         webkit_web_view_load_uri(app->view, uri_to_load);
         g_free(uri_to_load);
     }
@@ -1430,7 +1541,7 @@ init_app(App *app)
     if (!app->view)
         return FALSE;
 
-    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.1.5", NULL);
+    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.1.6", NULL);
     soup_server_add_early_handler(app->server, NULL, handle_early_request, NULL, NULL);
     soup_server_add_handler(app->server, NULL, handle_request, app, NULL);
     GError *error = NULL;
@@ -1456,10 +1567,9 @@ app_clear(App *app)
         g_main_loop_unref(app->loop);
     g_free(app->ha_url);
     g_free(app->ha_origin);
-    g_free(app->ha_path);
     g_free(app->token_file);
     secure_free_string(app->token);
-    g_free(app->allowed_path);
+    g_free(app->readiness_path);
     g_free(app->expected_text);
     g_free(app->fixture_html_path);
 }
@@ -1477,8 +1587,10 @@ main(void)
         return 70;
     }
 
-    g_message("WPE headless screenshot engine listening on internal port %u", app.port);
-    g_message("Allowed dashboard route: /%s", app.allowed_path);
+    g_message("Screenshot API ready: internal_port=%u renderer=ready", app.port);
+    g_message("Capture routes may target any safe relative path on the configured Home Assistant origin");
+    if (app.expected_text[0])
+        g_message("Readiness text check enabled for route=/%s", app.readiness_path);
     g_main_loop_run(app.loop);
     app_clear(&app);
     return 0;

@@ -34,7 +34,9 @@ jobs:
       github.event.workflow_run.event == 'schedule'))
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
+    timeout-minutes: 60
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       image_tags: ${{ steps.metadata.outputs.image_tags }}
@@ -42,13 +44,84 @@ jobs:
       version: ${{ steps.metadata.outputs.version }}
     steps:
       - name: Check out tested source
-        uses: actions/checkout@main
+        uses: actions/checkout@v7.0.1
         with:
           ref: >-
             ${{ github.event_name == 'release' && github.event.release.tag_name
                 || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha)
                 || inputs.version }}
           persist-credentials: false
+
+      - name: Wait for test and lint workflows to pass for this revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_EVENT: >-
+            ${{ github.event_name == 'release' && 'release'
+                || (github.event_name == 'workflow_run' && github.event.workflow_run.event)
+                || 'workflow_dispatch' }}
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+        shell: bash
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          if [[ -n "${EXPECTED_SHA}" && "${source_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "::error::Checked-out source does not match the completed test workflow revision."
+            exit 1
+          fi
+
+          case "${SOURCE_EVENT}" in
+            push)
+              test_event=push
+              lint_event=push
+              ;;
+            schedule)
+              test_event=schedule
+              lint_event=push
+              ;;
+            release|workflow_dispatch)
+              test_event=push
+              lint_event=push
+              ;;
+            *)
+              echo "::error::Unsupported CI source event: ${SOURCE_EVENT}"
+              exit 1
+              ;;
+          esac
+
+          echo "Waiting for successful test and lint runs for ${source_sha}."
+          deadline=$((SECONDS + 3300))
+          while (( SECONDS < deadline )); do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&per_page=100")"
+            test_run="$(jq -c --arg name 'Test Home Assistant app' --arg sha "${source_sha}" --arg event "${test_event}" \
+              '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .event == $event)] \
+              | sort_by([.run_number, .run_attempt]) | if length == 0 then empty else .[-1] end' <<< "${runs}")"
+            lint_run="$(jq -c --arg name 'Lint' --arg sha "${source_sha}" --arg event "${lint_event}" \
+              '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .event == $event)] \
+              | sort_by([.run_number, .run_attempt]) | if length == 0 then empty else .[-1] end' <<< "${runs}")"
+
+            test_status="$(jq -r '.status // "missing"' <<< "${test_run:-{}}")"
+            test_conclusion="$(jq -r '.conclusion // ""' <<< "${test_run:-{}}")"
+            lint_status="$(jq -r '.status // "missing"' <<< "${lint_run:-{}}")"
+            lint_conclusion="$(jq -r '.conclusion // ""' <<< "${lint_run:-{}}")"
+
+            if [[ "${test_status}" == completed && "${test_conclusion}" != success ]]; then
+              echo "::error::Test workflow concluded with ${test_conclusion}."
+              exit 1
+            fi
+            if [[ "${lint_status}" == completed && "${lint_conclusion}" != success ]]; then
+              echo "::error::Lint workflow concluded with ${lint_conclusion}."
+              exit 1
+            fi
+            if [[ "${test_status}" == completed && "${test_conclusion}" == success \
+               && "${lint_status}" == completed && "${lint_conclusion}" == success ]]; then
+              echo "Both test and lint workflows passed for ${source_sha}."
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "::error::Timed out waiting for successful test and lint runs for ${source_sha}."
+          exit 1
 
       - name: Set image tags
         id: metadata
@@ -110,7 +183,7 @@ jobs:
 
       - name: Create architecture matrix
         id: matrix
-        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@master
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@2026.09.0
         with:
           architectures: ${{ env.ARCHITECTURES }}
           image-name: ${{ env.IMAGE_NAME }}
@@ -129,7 +202,7 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Check out tested source
-        uses: actions/checkout@main
+        uses: actions/checkout@v7.0.1
         with:
           ref: >-
             ${{ github.event_name == 'release' && github.event.release.tag_name
@@ -138,7 +211,7 @@ jobs:
           persist-credentials: false
 
       - name: Build and publish image
-        uses: home-assistant/builder/actions/build-image@master
+        uses: home-assistant/builder/actions/build-image@2026.09.0
         with:
           arch: ${{ matrix.arch }}
           context: wpe_screenshot_engine
@@ -158,7 +231,7 @@ jobs:
       packages: write
     steps:
       - name: Publish manifest
-        uses: home-assistant/builder/actions/publish-multi-arch-manifest@master
+        uses: home-assistant/builder/actions/publish-multi-arch-manifest@2026.09.0
         with:
           architectures: ${{ env.ARCHITECTURES }}
           container-registry-password: ${{ secrets.GITHUB_TOKEN }}

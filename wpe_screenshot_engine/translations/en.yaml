@@ -9,11 +9,15 @@ configuration:
       value is entered in a masked password field and can use a Home Assistant
       !secret reference.
   dashboard_path:
-    name: Home Assistant route
-    description: Relative Home Assistant frontend path to render, without a leading slash.
+    name: Readiness check route
+    description: >-
+      Route where the optional readiness text is checked. Screenshot requests
+      can target any safe Home Assistant dashboard route.
   expected_text:
     name: Readiness text
-    description: Visible text that must appear before a screenshot is returned.
+    description: >-
+      Visible text required on the readiness check route. Leave blank to skip
+      the text check; other requested dashboard routes do not use this text.
   render_deadline_seconds:
     name: Render deadline
     description: Maximum time allowed for one dashboard capture.

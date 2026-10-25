@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cache_root="${PRE_COMMIT_HOME:-${XDG_CACHE_HOME:-$HOME/.cache/pre-commit}}/home-assistant-app-linter"
+LINTER_VERSION=v2.21.1
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required to run the Home Assistant app linter locally." >&2
@@ -15,11 +16,12 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 if [[ -d "${cache_root}/.git" ]]; then
-  git -C "$cache_root" fetch --quiet --depth=1 origin main
-  git -C "$cache_root" checkout --quiet --force --detach FETCH_HEAD
+  git -C "$cache_root" fetch --quiet --depth=1 origin \
+    "refs/tags/${LINTER_VERSION}:refs/tags/${LINTER_VERSION}"
+  git -C "$cache_root" checkout --quiet --force --detach "$LINTER_VERSION"
 else
   mkdir -p "$(dirname "$cache_root")"
-  git clone --quiet --depth=1 --single-branch --branch main \
+  git clone --quiet --depth=1 --single-branch --branch "$LINTER_VERSION" \
     https://github.com/frenck/action-app-linter.git "$cache_root"
 fi
 
