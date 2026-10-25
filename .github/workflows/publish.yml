@@ -83,9 +83,9 @@ jobs:
             echo "image_tags<<EOF"
             printf '%s\n' "${image_tags}"
             echo "EOF"
+            echo "skip_existing=${skip_existing}"
+            echo "version=${version}"
           } >> "${GITHUB_OUTPUT}"
-          echo "skip_existing=${skip_existing}" >> "${GITHUB_OUTPUT}"
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Create architecture matrix
         id: matrix

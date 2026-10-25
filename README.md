@@ -1,36 +1,62 @@
-# WPE Screenshot Engine app repository
+# Home Assistant App: WPE Screenshot Engine
 
-An experimental Home Assistant app that renders a configured Home Assistant frontend route with headless WPE WebKit and serves a 1280×800 PNG endpoint for [Home Assistant MCP](https://github.com/homeassistant-ai/ha-mcp).
+![Supports aarch64 Architecture](https://img.shields.io/badge/aarch64-yes-green.svg)
+![Supports amd64 Architecture](https://img.shields.io/badge/amd64-yes-green.svg)
 
-[![Add this repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FNischay-Pro%2Fha-wpe-screenshot-engine)
+An experimental Home Assistant app that renders one configured dashboard route as a 1280 × 800 PNG using headless WPE WebKit. It provides an HTTP screenshot endpoint for clients such as [Home Assistant MCP](https://github.com/homeassistant-ai/ha-mcp); it does not have a separate web dashboard.
 
-## Apps
-
-### WPE Screenshot Engine
-
-Renders one configured Home Assistant frontend route as a PNG for screenshot clients. The app reuses the loaded page between captures so live entities can continue updating. It defaults to `lovelace/energy` and accepts other safe relative routes on the configured Home Assistant origin. It is available for `amd64` and Home Assistant's `aarch64` architecture name for ARM64.
+[![Add repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FNischay-Pro%2Fha-wpe-screenshot-engine)
 
 ## Install
 
-1. In Home Assistant, open **Settings → Apps → Install app**.
-2. Open the menu and select **Repositories**.
-3. Add `https://github.com/Nischay-Pro/ha-wpe-screenshot-engine`.
-4. Install **WPE Screenshot Engine** from the repository.
+This app requires Home Assistant OS or a Supervised installation with the Apps feature.
 
-After tests pass on `main`, GitHub Actions publishes a multi-architecture `edge` image and an immutable commit-specific image to GitHub Container Registry. A nightly run also publishes a dated image and updates the `nightly` tag. These are for testing; they do not change the version installed by Home Assistant. To publish an installable release, create a GitHub release whose tag exactly matches the app version in `wpe_screenshot_engine/config.yaml` (currently `0.1.3`). That publishes the versioned image and `latest` tag. After the first release, make the GHCR package public so Home Assistant can pull it. Home Assistant pulls the image matching the app version and device architecture instead of building it on the HA host.
+1. Select the **Add repository** button above. To add it manually, open **Settings → Apps → Install app → ⋮ → Repositories** and enter `https://github.com/Nischay-Pro/ha-wpe-screenshot-engine`.
+2. Install **WPE Screenshot Engine**.
+3. Configure the app, then start it.
 
-## Configure and connect
+## Configure
 
-On first install, enter a long-lived Home Assistant access token in the app's masked **Home Assistant access token** field. Use a dedicated, non-admin Home Assistant user. You can use a `!secret` reference instead of entering the token directly. The app writes the resolved value to a mode-restricted file on its temporary filesystem; it is not included in logs.
+Open the app's **Configuration** tab. The access token is required.
 
-Set the Home Assistant URL and route path in the app's **Configuration** tab. Change the readiness text to text that appears on the selected page. The page reuse interval and WebKit memory pressure target are also configurable there.
+| Option | What to enter | Default |
+| --- | --- | --- |
+| Home Assistant URL | Base URL reachable from this app, with no path. | `http://homeassistant:8123` |
+| Home Assistant access token | Long-lived token for a dedicated, non-admin Home Assistant user. The field is masked. | — |
+| Home Assistant route | Relative dashboard path, without a leading slash. For example, `lovelace/energy`. | `lovelace/energy` |
+| Readiness text | Text that appears on the dashboard before a screenshot is returned. | `Energy at a glance` |
+| Render deadline | Maximum time allowed for a screenshot, from 1 to 55 seconds. | `55` |
+| Page reuse idle interval | Seconds to keep the dashboard loaded between captures, from 0 to 3600. Set to `0` to reload each time. | `300` |
+| WebKit memory target | WebKit process memory pressure target, from 512 to 3072 MiB. | `512` MiB |
 
-For HA MCP, enable its `ha_get_dashboard_screenshot` beta feature and set `HAMCP_DASHBOARD_SCREENSHOT_ENGINE_URL` to the app's internal hostname on port `8080`. Home Assistant prefixes that hostname with the repository ID, so it differs by repository URL. See the [HA MCP beta guide](https://github.com/homeassistant-ai/ha-mcp/blob/master/docs/beta.md).
+Create the token from a dedicated Home Assistant user's profile. Grant only the access that user needs to view the dashboard. The app stores the token in a restricted temporary file and does not write it to its logs.
 
-The app listens internally on port `8080`. Its host port mapping is disabled by default; users can map it to a custom host port in the app's **Network** settings if needed. The endpoint has no inbound authentication; keep the app and its screenshot client on a trusted Home Assistant app network.
+The app renders the one route configured above. To switch dashboards, change the route and restart the app.
 
-## Development checks
+## Connect Home Assistant MCP
 
-GitHub Actions runs source and configuration linters, the Home Assistant app linter, and Hadolint for the Dockerfile on each push and pull request. To run the source hooks locally, install `pre-commit`, `cppcheck`, `shellcheck`, and `yamllint`, then run `pre-commit run --all-files`.
+1. Enable the dashboard screenshot feature in your Home Assistant MCP settings.
+2. Set its screenshot engine URL to `http://<app-hostname>:8080`.
 
-The test workflow builds the app for `amd64` and `aarch64` on native runners, then runs fixture-based HTTP, input-validation, token-handling, renderer-reuse, and PNG-output checks against each image. It also runs the pinned Home Assistant MCP capture client against the fixture on both architectures. These checks do not need a live Home Assistant instance or token.
+Use the WPE Screenshot Engine's internal Home Assistant app hostname. When both apps are installed through Home Assistant, the hostname may include the repository identifier. Do not use `localhost` from the MCP app; that points back to the MCP app itself. The route comes from the WPE app's **Home Assistant route** setting. For Docker-based MCP deployments, set `HAMCP_DASHBOARD_SCREENSHOT_ENGINE_URL` to the same base URL.
+
+See the [Home Assistant MCP screenshot guide](https://github.com/homeassistant-ai/ha-mcp/blob/master/docs/beta.md) for current feature settings.
+
+## Network and security
+
+The screenshot API listens on port `8080` inside the app network. Home Assistant does not publish a host port by default. If another device needs direct access, map a host port in the app's **Network** settings.
+
+The API does not require a second token. Keep it on a trusted network and do not expose it directly to the internet.
+
+## Troubleshooting
+
+- **Login page or authorization error:** Check the Home Assistant URL and token. Make sure the token's user can open the configured dashboard.
+- **Dashboard never becomes ready:** Check that the readiness text is visible on the selected route. Update the route or readiness text if needed.
+- **MCP cannot connect:** Confirm the MCP screenshot engine URL uses the WPE app's internal hostname and port `8080`.
+- **Check app health:** `GET /healthz` reports whether the service is running; `GET /readyz` reports whether the renderer is ready.
+
+## For maintainers
+
+GitHub Actions tests changes on pushes and pull requests, then publishes `edge` images after successful `main` builds. A nightly run publishes a `nightly` image for testing. To publish an installable app update, increase `version` in `wpe_screenshot_engine/config.yaml`, wait for checks to pass, then publish a GitHub release with the same version as its tag. The build publishes images for `amd64` and `aarch64`; make the GHCR package public after its first publish.
+
+To install the local pre-commit hook, install `pre-commit`, `cppcheck`, `shellcheck`, and `yamllint`, then run `pre-commit install`. Run all hooks manually with `pre-commit run --all-files`.
