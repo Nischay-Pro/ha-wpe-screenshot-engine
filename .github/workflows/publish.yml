@@ -3,6 +3,12 @@ name: Publish Home Assistant app images
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: App version from wpe_screenshot_engine/config.yaml to republish
+        required: true
+        type: string
   workflow_run:
     workflows: [Test Home Assistant app]
     types: [completed]
@@ -20,6 +26,7 @@ jobs:
     name: Prepare image build
     if: >-
       github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
@@ -37,15 +44,21 @@ jobs:
       - name: Check out tested source
         uses: actions/checkout@main
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.workflow_run.head_sha }}
+          ref: >-
+            ${{ github.event_name == 'release' && github.event.release.tag_name
+                || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha)
+                || inputs.version }}
           persist-credentials: false
 
       - name: Set image tags
         id: metadata
         env:
-          SOURCE_EVENT: ${{ github.event_name == 'release' && 'release' || github.event.workflow_run.event }}
-          SOURCE_SHA: ${{ github.event_name == 'release' && github.sha || github.event.workflow_run.head_sha }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SOURCE_EVENT: >-
+            ${{ github.event_name == 'release' && 'release'
+                || (github.event_name == 'workflow_run' && github.event.workflow_run.event)
+                || 'workflow_dispatch' }}
+          SOURCE_SHA: ${{ github.event_name == 'release' && github.sha || github.event.workflow_run.head_sha || github.sha }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
         shell: bash
         run: |
           app_version="$(awk -F '"' '/^version:/ { print $2; exit }' wpe_screenshot_engine/config.yaml)"
@@ -64,6 +77,14 @@ jobs:
               version="${app_version}"
               image_tags="$(printf '%s\nlatest' "${app_version}")"
               skip_existing="${app_version}"
+              ;;
+            workflow_dispatch)
+              if [[ "${RELEASE_TAG}" != "${app_version}" ]]; then
+                echo "::error::Manual republish version must exactly match config.yaml version (${app_version})."
+                exit 1
+              fi
+              version="${app_version}"
+              image_tags="$(printf '%s\nlatest' "${app_version}")"
               ;;
             push)
               version="edge-${SOURCE_SHA:0:12}"
@@ -110,7 +131,10 @@ jobs:
       - name: Check out tested source
         uses: actions/checkout@main
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.workflow_run.head_sha }}
+          ref: >-
+            ${{ github.event_name == 'release' && github.event.release.tag_name
+                || (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha)
+                || inputs.version }}
           persist-credentials: false
 
       - name: Build and publish image
