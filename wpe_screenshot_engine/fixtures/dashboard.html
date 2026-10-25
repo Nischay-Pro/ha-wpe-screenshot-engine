@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WPE fixture dashboard</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        width: 1280px;
+        height: 800px;
+        margin: 0;
+        overflow: hidden;
+        background: #123456;
+        color: #ffffff;
+        font: 24px/1.35 "DejaVu Sans", sans-serif;
+      }
+      header {
+        height: 76px;
+        padding: 18px 28px;
+        background: #243f60;
+        font-size: 28px;
+        font-weight: 700;
+      }
+      .card {
+        position: absolute;
+        left: 40px;
+        top: 112px;
+        width: 360px;
+        height: 164px;
+        padding: 18px;
+        border-radius: 8px;
+        background: #d02030;
+      }
+      #chart {
+        position: absolute;
+        left: 460px;
+        top: 112px;
+        width: 320px;
+        height: 120px;
+      }
+      #fixture-ready { display: block; margin-top: 8px; font-size: 16px; }
+    </style>
+  </head>
+  <body>
+    <header>WPE headless rendering fixture</header>
+    <main>
+      <section class="card">
+        <strong>Plug Power</strong>
+        <span id="fixture-ready" data-fixture-ready="false">Loading delayed dashboard data…</span>
+      </section>
+      <canvas id="chart" width="320" height="120" aria-label="Fixture chart"></canvas>
+    </main>
+    <script>
+      const ready = document.querySelector("#fixture-ready");
+      const loadKey = "wpe-fixture-load-count";
+      const loadCount = Number(localStorage.getItem(loadKey) || "0") + 1;
+      localStorage.setItem(loadKey, String(loadCount));
+      setTimeout(() => {
+        ready.dataset.fixtureReady = "true";
+        ready.textContent = `Plug Power fixture ready ${Date.now()}`;
+        const context = document.querySelector("#chart").getContext("2d");
+        context.fillStyle = "#20d050";
+        context.fillRect(0, 0, 320, 120);
+        context.fillStyle = "#f0d020";
+        context.fillRect(40, 20, 80, 80);
+        context.fillStyle = loadCount % 2 ? "#123abc" : "#bc3210";
+        context.fillRect(280, 0, 40, 120);
+      }, __FIXTURE_DELAY_MS__);
+    </script>
+  </body>
+</html>

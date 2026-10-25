@@ -1,0 +1,45 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: main
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: master
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: main
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: main
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: cppcheck
+        name: Cppcheck C static analysis
+        entry: >-
+          cppcheck --quiet --enable=warning,performance,portability
+          --error-exitcode=1 --inline-suppr --suppress=missingIncludeSystem
+          --std=c11 --language=c
+        language: system
+        types: [c]
+        files: ^wpe_screenshot_engine/src/.*\.c$
+
+      - id: yamllint
+        name: yamllint YAML style
+        entry: yamllint
+        language: system
+        types: [yaml]

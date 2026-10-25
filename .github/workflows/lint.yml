@@ -1,0 +1,60 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  pre-commit:
+    name: Lint source and workflow files
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@main
+        with:
+          persist-credentials: false
+
+      - name: Install system linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes cppcheck shellcheck yamllint
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@main
+
+  hadolint:
+    name: Lint Dockerfile
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@main
+        with:
+          persist-credentials: false
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@master
+        with:
+          dockerfile: wpe_screenshot_engine/Dockerfile
+
+  home-assistant-config:
+    name: Lint Home Assistant app configuration
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@main
+        with:
+          persist-credentials: false
+
+      - name: Run Home Assistant app linter
+        uses: frenck/action-app-linter@main
+        with:
+          path: ./wpe_screenshot_engine

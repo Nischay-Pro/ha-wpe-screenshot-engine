@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report an HA MCP integration issue
+    url: https://github.com/homeassistant-ai/ha-mcp/issues
+    about: Use this for issues in HA MCP rather than the screenshot engine endpoint.
+  - name: Read setup and configuration guidance
+    url: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine#readme
+    about: Check install, token, network, and route configuration first.

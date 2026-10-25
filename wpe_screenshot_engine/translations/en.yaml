@@ -1,0 +1,29 @@
+configuration:
+  home_assistant_url:
+    name: Home Assistant URL
+    description: Base HTTP or HTTPS origin of Home Assistant.
+  home_assistant_token:
+    name: Home Assistant access token
+    description: >-
+      Long-lived token for a dedicated, non-admin Home Assistant user. This
+      value is entered in a masked password field and can use a Home Assistant
+      !secret reference.
+  dashboard_path:
+    name: Home Assistant route
+    description: Relative Home Assistant frontend path to render, without a leading slash.
+  expected_text:
+    name: Readiness text
+    description: Visible text that must appear before a screenshot is returned.
+  render_deadline_seconds:
+    name: Render deadline
+    description: Maximum time allowed for one dashboard capture.
+  dashboard_reuse_idle_seconds:
+    name: Page reuse idle interval
+    description: >-
+      Reuse the loaded dashboard until it has been idle for this many seconds.
+      Set to 0 to reload on every capture.
+  webkit_process_memory_limit_mb:
+    name: WebKit memory pressure target
+    description: Per-process WebKit memory target, from 512 to 3072 MiB.
+network:
+  8080/tcp: Internal screenshot API. Not published by default.

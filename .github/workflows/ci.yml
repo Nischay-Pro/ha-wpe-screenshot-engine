@@ -1,0 +1,69 @@
+name: Test Home Assistant app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  ARCHITECTURES: '["amd64", "aarch64"]'
+  IMAGE_NAME: ha-wpe-screenshot-engine
+  REGISTRY_PREFIX: ghcr.io/nischay-pro
+
+jobs:
+  prepare:
+    name: Prepare test matrix
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Create architecture matrix
+        id: matrix
+        uses: home-assistant/builder/actions/prepare-multi-arch-matrix@master
+        with:
+          architectures: ${{ env.ARCHITECTURES }}
+          image-name: ${{ env.IMAGE_NAME }}
+          registry-prefix: ${{ env.REGISTRY_PREFIX }}
+
+  build-and-test:
+    name: Test ${{ matrix.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@main
+        with:
+          persist-credentials: false
+
+      - name: Build app image
+        uses: home-assistant/builder/actions/build-image@master
+        with:
+          arch: ${{ matrix.arch }}
+          context: wpe_screenshot_engine
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          cosign: "false"
+          image: ${{ matrix.image }}
+          image-tags: ci-${{ github.sha }}
+          load: "true"
+          push: "false"
+          version: ci-${{ github.sha }}
+
+      - name: Run HTTP and security regression tests
+        env:
+          WPE_IMAGE: ${{ matrix.image }}:ci-${{ github.sha }}
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Run pinned HA MCP fixture integration
+        env:
+          WPE_IMAGE: ${{ matrix.image }}:ci-${{ github.sha }}
+        run: sh tests/run_mcp_fixture_integration.sh
