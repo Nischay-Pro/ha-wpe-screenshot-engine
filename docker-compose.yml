@@ -1,0 +1,37 @@
+services:
+  wpe-screenshot-engine:
+    image: ghcr.io/nischay-pro/ha-wpe-screenshot-engine:latest
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 5s
+    ports:
+      - "${WPE_HOST_PORT:-19433}:8080"
+    environment:
+      HA_URL: ${HA_URL:-http://homeassistant:8123}
+      HA_TOKEN_FILE: /run/secrets/ha_token
+      HA_CA_CERT_FILE: ${HA_CA_CERT_FILE:-}
+      DASHBOARD_PATH: ${DASHBOARD_PATH:-lovelace/energy}
+      EXPECTED_TEXT: ${EXPECTED_TEXT:-}
+      RENDER_DEADLINE_SECONDS: ${RENDER_DEADLINE_SECONDS:-55}
+      DASHBOARD_REUSE_IDLE_SECONDS: ${DASHBOARD_REUSE_IDLE_SECONDS:-300}
+      WEBKIT_PROCESS_MEMORY_LIMIT_MB: ${WEBKIT_PROCESS_MEMORY_LIMIT_MB:-512}
+    secrets:
+      - ha_token
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m
+    # Mount private Home Assistant CAs under /ssl if HA_CA_CERT_FILE is set.
+    # volumes:
+    #   - ./ssl:/ssl:ro
+
+secrets:
+  ha_token:
+    file: ${WPE_TOKEN_FILE:-./secrets/ha_token}

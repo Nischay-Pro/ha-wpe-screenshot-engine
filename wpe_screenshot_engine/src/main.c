@@ -120,11 +120,13 @@ struct _App {
     guint64 next_request_id;
     guint64 view_generation;
     guint recreate_view_source;
+    guint idle_release_source;
     guint port;
     guint render_deadline_ms;
     guint dashboard_reuse_idle_seconds;
     guint webkit_process_memory_limit_mb;
     gboolean renderer_ready;
+    gboolean renderer_idle_released;
     gboolean dashboard_loaded;
     gint64 dashboard_last_capture_at_us;
     gchar *dashboard_requested_path;
@@ -163,6 +165,7 @@ static void disconnect_message_handlers(RenderRequest *request);
 static void cancel_disconnected_request(RenderRequest *request);
 static void app_recreate_view(App *app);
 static void app_schedule_recreate_view(App *app);
+static void app_schedule_idle_release(App *app);
 static gboolean app_ensure_view(App *app);
 static gboolean current_request(RenderRequest *request);
 static gboolean same_origin(App *app, const gchar *candidate);
@@ -745,8 +748,12 @@ request_finish(RenderRequest *request, guint status, const gchar *text,
         reset_view = TRUE;
     if (owns_active)
         app->active = NULL;
+    if (owns_active)
+        remove_source(&app->idle_release_source);
     if (reset_view)
         app_schedule_recreate_view(app);
+    if (owns_active)
+        app_schedule_idle_release(app);
     soup_server_message_unpause(request->message);
     if (owns_active)
         request_unref(request);
@@ -775,6 +782,7 @@ cancel_disconnected_request(RenderRequest *request)
     g_cancellable_cancel(request->cancellable);
     soup_server_message_unpause(request->message);
     app->active = NULL;
+    remove_source(&app->idle_release_source);
     if (!request->auto_height && !request->tiled_auto_height &&
         app->dashboard_loaded &&
         !g_strcmp0(app->dashboard_requested_path, request->path) &&
@@ -784,6 +792,7 @@ cancel_disconnected_request(RenderRequest *request)
     } else {
         app_schedule_recreate_view(app);
     }
+    app_schedule_idle_release(app);
     request_unref(request); /* Release the app->active reference. */
 }
 
@@ -980,11 +989,13 @@ create_view(App *app)
 static void
 app_recreate_view(App *app)
 {
+    remove_source(&app->idle_release_source);
     if (app->recreate_view_source) {
         g_source_remove(app->recreate_view_source);
         app->recreate_view_source = 0;
     }
     app->renderer_ready = FALSE;
+    app->renderer_idle_released = FALSE;
     app->dashboard_loaded = FALSE;
     app->dashboard_last_capture_at_us = 0;
     g_clear_pointer(&app->dashboard_requested_path, g_free);
@@ -1007,12 +1018,14 @@ app_recreate_view_idle(gpointer user_data)
     App *app = user_data;
     app->recreate_view_source = 0;
     app_recreate_view(app);
+    app_schedule_idle_release(app);
     return G_SOURCE_REMOVE;
 }
 
 static void
 app_schedule_recreate_view(App *app)
 {
+    remove_source(&app->idle_release_source);
     app->dashboard_loaded = FALSE;
     app->dashboard_last_capture_at_us = 0;
     g_clear_pointer(&app->dashboard_requested_path, g_free);
@@ -1027,12 +1040,62 @@ app_ensure_view(App *app)
 {
     if (app->recreate_view_source)
         app_recreate_view(app);
-    if (app->renderer_ready && app->view && app->wpe_view)
+    if (app->renderer_ready && app->view && app->wpe_view) {
+        app_schedule_idle_release(app);
         return TRUE;
+    }
 
-    g_warning("WPE renderer is unavailable; attempting to recreate the view");
+    if (app->renderer_idle_released)
+        g_message("Renderer was released while idle; recreating it on demand");
+    else
+        g_warning("WPE renderer is unavailable; attempting to recreate the view");
     app_recreate_view(app);
-    return app->renderer_ready && app->view && app->wpe_view;
+    gboolean ready = app->renderer_ready && app->view && app->wpe_view;
+    if (ready)
+        app_schedule_idle_release(app);
+    return ready;
+}
+
+static gboolean
+app_release_idle_renderer(gpointer user_data)
+{
+    App *app = user_data;
+    app->idle_release_source = 0;
+    if (app->active || !app->view || !app->renderer_ready)
+        return G_SOURCE_REMOVE;
+
+    app->renderer_ready = FALSE;
+    app->renderer_idle_released = TRUE;
+    app->dashboard_loaded = FALSE;
+    app->dashboard_last_capture_at_us = 0;
+    g_clear_pointer(&app->dashboard_requested_path, g_free);
+    app->wpe_view = NULL;
+    app->view_generation++;
+
+    /* Drop the heavy web process after its page-reuse window expires. The
+     * listener and WebKit context stay alive; a later capture recreates a view. */
+    g_signal_handlers_disconnect_by_data(app->view, app);
+    webkit_web_view_terminate_web_process(app->view);
+    g_clear_object(&app->view);
+    g_message("Renderer released after %u idle seconds; HTTP service remains available",
+              app->dashboard_reuse_idle_seconds);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+app_schedule_idle_release(App *app)
+{
+    if (app->active || app->idle_release_source || !app->renderer_ready || !app->view)
+        return;
+
+    if (app->dashboard_reuse_idle_seconds) {
+        app->idle_release_source = g_timeout_add_seconds_full(
+            G_PRIORITY_LOW, app->dashboard_reuse_idle_seconds,
+            app_release_idle_renderer, app, NULL);
+    } else {
+        app->idle_release_source = g_idle_add_full(
+            G_PRIORITY_LOW, app_release_idle_renderer, app, NULL);
+    }
 }
 
 static gboolean
@@ -3044,7 +3107,7 @@ init_app(App *app)
     if (!app->view)
         return FALSE;
 
-    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.2.0",
+    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.2.1",
                                   "raw-paths", TRUE, NULL);
     soup_server_add_early_handler(app->server, NULL, handle_early_request, NULL, NULL);
     soup_server_add_handler(app->server, NULL, handle_request, app, NULL);
@@ -3054,6 +3117,7 @@ init_app(App *app)
         g_clear_error(&error);
         return FALSE;
     }
+    app_schedule_idle_release(app);
     return TRUE;
 }
 
@@ -3071,6 +3135,8 @@ on_shutdown_signal(gpointer user_data)
 static void
 app_clear(App *app)
 {
+    remove_source(&app->idle_release_source);
+    remove_source(&app->recreate_view_source);
     if (app->server)
         soup_server_disconnect(app->server);
     g_clear_object(&app->server);

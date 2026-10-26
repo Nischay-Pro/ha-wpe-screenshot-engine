@@ -29,7 +29,7 @@ FROM debian:forky-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_ARCH=amd64
-ARG BUILD_VERSION=0.2.0
+ARG BUILD_VERSION=0.2.1
 LABEL io.hass.name="WPE Screenshot Engine" \
       io.hass.description="Private WPE WebKit engine for Home Assistant dashboard screenshots" \
       io.hass.type="app" \
@@ -79,4 +79,4 @@ RUN chmod 0555 /usr/local/bin/wpe-screenshot-engine /usr/local/bin/run.sh \
 USER 0:0
 ENTRYPOINT ["/usr/local/bin/run.sh"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
-    CMD ["/usr/bin/wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/readyz"]
+    CMD ["/usr/bin/wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/healthz"]

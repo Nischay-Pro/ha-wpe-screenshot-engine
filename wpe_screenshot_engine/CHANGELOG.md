@@ -2,6 +2,20 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.1] - 2026-10-25
+
+### Added
+
+- Add a Docker Compose sidecar setup using the prebuilt multi-architecture image and a file-backed Home Assistant token.
+
+### Changed
+
+- Terminate the WebKit web process after the configured idle timeout to reduce idle memory, and recreate it on demand for the next screenshot.
+- Use `/healthz` for the container health check so periodic health probes do not wake the renderer.
+- Document both Home Assistant App and Docker Compose installation paths, token setup, and MCP network configuration.
+
 ## [0.2.0] - 2026-10-25
 
 ### Added
@@ -92,7 +106,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Configure the Home Assistant URL and token, dashboard route, readiness text, render deadline, page reuse interval, and WebKit memory target.
 - Provide `/healthz` and `/readyz` endpoints.
 
-[Unreleased]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.1...HEAD
+[0.2.1]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/releases/tag/0.2.0
 [0.1.7]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/releases/tag/0.1.7
 [0.1.6]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/releases/tag/0.1.6

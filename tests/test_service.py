@@ -216,7 +216,7 @@ class _ServiceTests(unittest.TestCase):
             "--env",
             "RENDER_DEADLINE_SECONDS=5",
             "--env",
-            "DASHBOARD_REUSE_IDLE_SECONDS=2",
+            "DASHBOARD_REUSE_IDLE_SECONDS=300",
             IMAGE,
         )
 
@@ -898,7 +898,102 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(status, 200, body.decode("utf-8", "replace"))
         width, height, pixels = decode_rgba_png(body)
         self.assertEqual((width, height), (1280, 800))
-        self.assertNotEqual(marker_colors[1], pixel(pixels, width, 750, 150))
+        self.assertEqual(marker_colors[1], pixel(pixels, width, 750, 150))
+
+    def test_idle_renderer_releases_web_process_and_recovers(self) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        name = f"wpe-idle-renderer-test-{os.getpid()}"
+        docker(
+            "run",
+            "--detach",
+            "--init",
+            "--name",
+            name,
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,size=512m",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "768m",
+            "--cpus",
+            "2",
+            "--network",
+            "host",
+            "--env",
+            "WPE_FIXTURE_MODE=1",
+            "--env",
+            "HA_URL=http://fixture.local",
+            "--env",
+            "DASHBOARD_PATH=lovelace/energy",
+            "--env",
+            "EXPECTED_TEXT=Plug Power",
+            "--env",
+            f"PORT={port}",
+            "--env",
+            "RENDER_DEADLINE_SECONDS=5",
+            "--env",
+            "DASHBOARD_REUSE_IDLE_SECONDS=2",
+            IMAGE,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    status, _, _ = request_at(port, "/readyz", timeout=1)
+                    if status == 200:
+                        break
+                except (OSError, urllib.error.URLError):
+                    pass
+                time.sleep(0.1)
+            else:
+                logs = docker("logs", name, check=False)
+                self.fail("idle renderer fixture did not start:\n" + logs.stderr)
+
+            status, _, body = request_at(port, ROUTE + "?wait=0")
+            self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+
+            deadline = time.monotonic() + 10
+            logs = ""
+            while time.monotonic() < deadline:
+                result = docker("logs", name, check=False)
+                logs = result.stdout + result.stderr
+                if "Renderer released after 2 idle seconds" in logs:
+                    break
+                time.sleep(0.1)
+            self.assertIn("Renderer released after 2 idle seconds", logs)
+
+            deadline = time.monotonic() + 5
+            processes = ""
+            while time.monotonic() < deadline:
+                processes = docker("exec", name, "ps", "-eo", "args").stdout
+                if "WPEWebProcess" not in processes:
+                    break
+                time.sleep(0.1)
+            self.assertNotIn("WPEWebProcess", processes)
+
+            status, _, body = request_at(port, "/healthz")
+            self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+
+            status, _, body = request_at(port, ROUTE + "?wait=0")
+            self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+            logs = docker("logs", name, check=False)
+            self.assertIn(
+                "Renderer was released while idle; recreating it on demand",
+                logs.stdout + logs.stderr,
+            )
+        finally:
+            docker("rm", "--force", name, check=False)
 
     def test_page_reuse_survives_same_origin_dashboard_redirect(self) -> None:
         before = docker("logs", self.name, check=False)
@@ -1254,6 +1349,8 @@ class _ServiceTests(unittest.TestCase):
         )
 
     def test_web_process_is_non_root_without_nested_bubblewrap(self) -> None:
+        status, _, body = request(ROUTE + "?wait=0")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
         self.assertEqual(
             docker("inspect", "--format", "{{.Config.User}}", IMAGE).stdout.strip(),
             "0:0",

@@ -27,10 +27,12 @@ configuration:
     name: Render deadline
     description: Maximum time allowed for one dashboard capture.
   dashboard_reuse_idle_seconds:
-    name: Page reuse idle interval
+    name: Renderer idle timeout
     description: >-
-      Reuse the loaded dashboard until it has been idle for this many seconds.
-      Set to 0 to reload on every capture.
+      Keep the WebKit renderer warm for this many idle seconds. When the timer
+      expires, its web process is terminated to reduce idle memory; the next
+      screenshot starts a fresh renderer. Set to 0 to release it after each
+      request.
   webkit_process_memory_limit_mb:
     name: WebKit memory pressure target
     description: Per-process WebKit memory target, from 512 to 3072 MiB.
