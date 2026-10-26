@@ -1,0 +1,43 @@
+FROM debian:forky-slim
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      gcc \
+      pkg-config \
+      libglib2.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY src/pixel_convert.c /build/pixel_convert.c
+COPY src/pixel_convert.h /build/pixel_convert.h
+COPY tests/test_pixel_convert.c /build/test_pixel_convert.c
+
+# Run converter edge tests with architecture SIMD and the scalar fallback.
+# hadolint ignore=SC2046
+RUN gcc -std=c11 -O2 -Wall -Wextra -Wformat=2 -Werror \
+    -o /build/test-pixel-convert /build/pixel_convert.c /build/test_pixel_convert.c \
+    $(pkg-config --cflags --libs glib-2.0) \
+    && /build/test-pixel-convert \
+    && gcc -std=c11 -O2 -Wall -Wextra -Wformat=2 -Werror \
+       -DWPE_PIXEL_DISABLE_SIMD \
+       -o /build/test-pixel-convert-scalar /build/pixel_convert.c /build/test_pixel_convert.c \
+       $(pkg-config --cflags --libs glib-2.0) \
+    && /build/test-pixel-convert-scalar
+
+# hadolint ignore=SC2046
+RUN gcc -std=c11 -O2 -Wall -Wextra -Wformat=2 -Werror \
+    -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -o /build/test-pixel-convert-sanitized \
+    /build/pixel_convert.c /build/test_pixel_convert.c \
+    $(pkg-config --cflags --libs glib-2.0) \
+    && ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
+       /build/test-pixel-convert-sanitized \
+    && gcc -std=c11 -O2 -Wall -Wextra -Wformat=2 -Werror \
+       -fsanitize=address,undefined -fno-omit-frame-pointer \
+       -DWPE_PIXEL_DISABLE_SIMD \
+       -o /build/test-pixel-convert-sanitized-scalar \
+       /build/pixel_convert.c /build/test_pixel_convert.c \
+       $(pkg-config --cflags --libs glib-2.0) \
+    && ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
+       /build/test-pixel-convert-sanitized-scalar

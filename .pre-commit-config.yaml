@@ -43,7 +43,7 @@ repos:
           --std=c11 --language=c
         language: system
         types: [c]
-        files: ^wpe_screenshot_engine/src/.*\.c$
+        files: ^wpe_screenshot_engine/(src|tests)/.*\.c$
 
       - id: yamllint
         name: yamllint YAML style

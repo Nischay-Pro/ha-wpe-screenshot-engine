@@ -2,7 +2,22 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.2] - 2026-10-25
+
+### Added
+
+- Add AVX2 and NEON pixel conversion paths with a scalar fallback.
+
+### Changed
+
+- Accelerate opaque screenshot conversion, white compositing, and PNG opacity checks; use SIMD row conversion for BMP.
+- Reduce readiness polling delay for reused dashboard pages.
+- Retry failed renderer recreation from `/readyz` while keeping idle-released renderers ready.
+
+### Fixed
+
+- Safely discard canceled encoder results without dereferencing a null task result.
+- Limit renderer-unavailable warnings to one per recovery attempt sequence.
 
 ## [0.2.1] - 2026-10-25
 
@@ -106,7 +121,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Configure the Home Assistant URL and token, dashboard route, readiness text, render deadline, page reuse interval, and WebKit memory target.
 - Provide `/healthz` and `/readyz` endpoints.
 
-[Unreleased]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.1...HEAD
+[0.2.2]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/releases/tag/0.2.0
 [0.1.7]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/releases/tag/0.1.7

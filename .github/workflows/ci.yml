@@ -47,6 +47,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Run pixel conversion tests
+        run: >-
+          docker buildx build --output=type=cacheonly
+          --file wpe_screenshot_engine/Dockerfile.test
+          wpe_screenshot_engine
+
       - name: Build app image
         uses: home-assistant/builder/actions/build-image@2026.09.0
         with:

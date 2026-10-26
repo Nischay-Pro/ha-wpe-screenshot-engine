@@ -604,6 +604,17 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(pixel(pixels, width, 500, 130), (32, 208, 80, 255))
         self.assertEqual(pixel(pixels, width, 510, 150), (240, 208, 32, 255))
 
+    def test_alpha_blended_color_and_unaligned_width_render_correctly(self) -> None:
+        status, _, body = request(
+            "/lovelace/alpha?viewport=1279x800&zoom=1.0&wait=0&format=png"
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(body[25], 2, "opaque capture should use RGB PNG")
+        width, height, pixels = decode_rgba_png(body)
+        self.assertEqual((width, height), (1279, 800))
+        self.assertEqual(pixel(pixels, width, 420, 300), (227, 177, 152, 255))
+        self.assertEqual(pixel(pixels, width, 1278, 10), (36, 63, 96, 255))
+
     def test_custom_viewport_and_full_page_capture(self) -> None:
         status, headers, body = request(
             ROUTE + "?viewport=640x480&zoom=1.0&wait=0&format=png"
@@ -837,6 +848,15 @@ class _ServiceTests(unittest.TestCase):
                 self.assertTrue(body.startswith(signature))
                 if image_format == "webp":
                     self.assertEqual(body[8:12], b"WEBP")
+                elif image_format == "bmp":
+                    self.assertEqual(struct.unpack_from("<I", body, 2)[0], len(body))
+                    width, height = struct.unpack_from("<ii", body, 18)
+                    self.assertEqual((width, height), (640, 480))
+                    row_length = (width * 3 + 3) & ~3
+                    pixel_offset = 54 + (height - 1 - 5) * row_length + 5 * 3
+                    self.assertEqual(
+                        body[pixel_offset : pixel_offset + 3], bytes((96, 63, 36))
+                    )
 
         status, _, body = request("/lovelace/no-ha?viewport=64x64&wait=0&theme=Default")
         self.assertEqual(status, 502, body.decode("utf-8", "replace"))
@@ -880,10 +900,22 @@ class _ServiceTests(unittest.TestCase):
 
     def test_successive_captures_reuse_the_loaded_dashboard_page(self) -> None:
         images = []
-        for _ in range(2):
+        reused_capture_elapsed = None
+        for index in range(2):
+            started = time.monotonic()
             status, _, body = request(ROUTE + "?wait=0")
+            elapsed = time.monotonic() - started
             self.assertEqual(status, 200, body.decode("utf-8", "replace"))
             images.append(body)
+            if index == 1:
+                reused_capture_elapsed = elapsed
+
+        self.assertIsNotNone(reused_capture_elapsed)
+        self.assertLess(
+            reused_capture_elapsed,
+            0.18,
+            "capture of a reused dashboard page should not incur a 200 ms readiness poll",
+        )
 
         marker_colors = []
         for body in images:
@@ -944,6 +976,8 @@ class _ServiceTests(unittest.TestCase):
             "RENDER_DEADLINE_SECONDS=5",
             "--env",
             "DASHBOARD_REUSE_IDLE_SECONDS=2",
+            "--env",
+            "FIXTURE_VIEW_RECREATE_FAILURES=4",
             IMAGE,
         )
         try:
@@ -982,15 +1016,59 @@ class _ServiceTests(unittest.TestCase):
                 time.sleep(0.1)
             self.assertNotIn("WPEWebProcess", processes)
 
+            logs_before_probe = docker("logs", name, check=False)
+            recreations_before_probe = (
+                logs_before_probe.stdout + logs_before_probe.stderr
+            ).count("Renderer was released while idle; recreating it on demand")
+            for _ in range(5):
+                status, _, body = request_at(port, "/readyz")
+                self.assertEqual((status, body), (200, b"ready\n"))
+                time.sleep(0.1)
+            processes = docker("exec", name, "ps", "-eo", "args").stdout
+            self.assertNotIn(
+                "WPEWebProcess",
+                processes,
+                "/readyz polling should not recreate the released WebKit process",
+            )
+            probe_logs = docker("logs", name, check=False)
+            probe_text = probe_logs.stdout + probe_logs.stderr
+            self.assertEqual(
+                probe_text.count(
+                    "Renderer was released while idle; recreating it on demand"
+                ),
+                recreations_before_probe,
+            )
+
             status, _, body = request_at(port, "/healthz")
             self.assertEqual(status, 200, body.decode("utf-8", "replace"))
 
             status, _, body = request_at(port, ROUTE + "?wait=0")
+            self.assertEqual(status, 503, body.decode("utf-8", "replace"))
+            self.assertIn(b"renderer is unavailable", body)
+            for _ in range(3):
+                status, _, body = request_at(port, "/readyz")
+                self.assertEqual((status, body), (503, b"renderer unavailable\n"))
+            status, _, body = request_at(port, "/readyz")
+            self.assertEqual((status, body), (200, b"ready\n"))
+
+            status, _, body = request_at(port, ROUTE + "?wait=0")
             self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+            status, _, body = request_at(port, "/readyz")
+            self.assertEqual((status, body), (200, b"ready\n"))
             logs = docker("logs", name, check=False)
+            log_text = logs.stdout + logs.stderr
             self.assertIn(
-                "Renderer was released while idle; recreating it on demand",
-                logs.stdout + logs.stderr,
+                "Renderer was released while idle; recreating it on demand", log_text
+            )
+            self.assertEqual(
+                log_text.count("Fixture injected a WPE view recreation failure"), 4
+            )
+            self.assertEqual(
+                log_text.count(
+                    "WPE renderer is unavailable; attempting to recreate the view"
+                ),
+                1,
+                "repeated failing readiness probes should not flood warning logs",
             )
         finally:
             docker("rm", "--force", name, check=False)
@@ -1237,6 +1315,58 @@ class _ServiceTests(unittest.TestCase):
             + logs.stdout
             + logs.stderr
         )
+
+    def test_disconnected_large_encode_does_not_crash_service(self) -> None:
+        before = docker("logs", self.name, check=False)
+        before_text = before.stdout + before.stderr
+        encoding_count = before_text.count("Screenshot encoding started:")
+        discarded_count = before_text.count("Screenshot encoding discarded:")
+        disconnected_count = before_text.count("Screenshot client disconnected:")
+
+        with socket.create_connection(("127.0.0.1", self.port), timeout=3) as client:
+            client.sendall(
+                b"GET /lovelace/energy?viewport=4096x3600&zoom=1.0&wait=0&format=webp HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                logs = docker("logs", self.name, check=False)
+                log_text = logs.stdout + logs.stderr
+                if log_text.count("Screenshot encoding started:") > encoding_count:
+                    reset_connection(client)
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("large WebP capture did not reach the encoder")
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            logs = docker("logs", self.name, check=False)
+            log_text = logs.stdout + logs.stderr
+            if log_text.count("Screenshot client disconnected:") > disconnected_count:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("the engine did not observe the encoding request disconnect")
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            logs = docker("logs", self.name, check=False)
+            log_text = logs.stdout + logs.stderr
+            if log_text.count("Screenshot encoding discarded:") > discarded_count:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("the cancelled encoding task did not finish its callback")
+
+        running = docker("inspect", "--format", "{{.State.Running}}", self.name)
+        self.assertEqual(
+            running.stdout.strip(), "true", "engine exited after cancellation"
+        )
+        status, _, body = request(ROUTE + "?wait=0", timeout=15)
+        self.assertEqual(status, 200, body[:128].decode("utf-8", "replace"))
+        self.assertEqual(body[25], 2, "follow-up opaque screenshot should be RGB PNG")
 
     def test_half_closed_request_still_receives_capture(self) -> None:
         before = docker("logs", self.name, check=False)
@@ -2111,6 +2241,18 @@ class _ServiceTests(unittest.TestCase):
             "<script>if(location.pathname.endsWith('/iframe')){"
             f"document.write('<iframe src=\"http://127.0.0.1:{external_port}/iframe\"></iframe>');"
             "}</script>"
+            "<script>if(location.pathname.endsWith('/srcdoc')){"
+            "const frame=document.createElement('iframe');"
+            "frame.srcdoc='<p>inline child document</p>';"
+            "document.body.appendChild(frame);}</script>"
+            "<script>if(location.pathname.endsWith('/blob')){"
+            "const frame=document.createElement('iframe');"
+            "frame.src=URL.createObjectURL(new Blob(['<p>blob child</p>'],"
+            "{type:'text/html'}));document.body.appendChild(frame);}</script>"
+            "<script>if(location.pathname.endsWith('/data')){"
+            "const frame=document.createElement('iframe');"
+            "frame.src='data:text/html,%3Cp%3Edata%20child%3C%2Fp%3E';"
+            "document.body.appendChild(frame);}</script>"
             "<script>if(location.pathname.endsWith('/blocked'))"
             f"setTimeout(()=>location.href='http://127.0.0.1:{external_port}/main',25);</script>"
             "</body></html>"
@@ -2179,6 +2321,18 @@ class _ServiceTests(unittest.TestCase):
                 status, _, body = request_at(port, "/lovelace/iframe?wait=0", timeout=8)
                 self.assertEqual(status, 502, body.decode("utf-8", "replace"))
                 self.assertNotIn("/iframe", external_requests)
+
+                for child_route in ("srcdoc", "blob", "data"):
+                    status, _, body = request_at(
+                        port, f"/lovelace/{child_route}?wait=0", timeout=8
+                    )
+                    self.assertEqual(
+                        status,
+                        502,
+                        f"{child_route} iframe navigation did not follow the origin policy: "
+                        + body.decode("utf-8", "replace"),
+                    )
+                    self.assertIn(b"outside the configured origin was blocked", body)
 
                 try:
                     status, _, body = request_at(

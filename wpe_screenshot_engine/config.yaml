@@ -1,6 +1,6 @@
 name: "WPE Screenshot Engine"
 slug: "wpe_screenshot_engine"
-version: "0.2.1"
+version: "0.2.2"
 description: "Headless WPE WebKit screenshot renderer for Home Assistant dashboards"
 url: "https://github.com/Nischay-Pro/ha-wpe-screenshot-engine"
 image: "ghcr.io/nischay-pro/ha-wpe-screenshot-engine"

@@ -14,6 +14,8 @@ RUN apt-get update \
 
 WORKDIR /build
 COPY src/main.c /build/main.c
+COPY src/pixel_convert.c /build/pixel_convert.c
+COPY src/pixel_convert.h /build/pixel_convert.h
 COPY fixtures/dashboard.html /opt/wpe-engine/fixtures/dashboard.html
 # pkg-config intentionally expands its output into separate compiler arguments.
 # hadolint ignore=SC2046
@@ -21,7 +23,7 @@ RUN gcc -std=c11 -O2 -pipe -fPIE -pie \
     -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
     -Wall -Wextra -Wformat=2 -Werror \
     -Wl,-z,relro,-z,now \
-    -o /build/wpe-screenshot-engine /build/main.c \
+    -o /build/wpe-screenshot-engine /build/main.c /build/pixel_convert.c \
     $(pkg-config --cflags --libs wpe-webkit-2.0 wpe-platform-headless-2.0 libsoup-3.0 libpng16 gio-unix-2.0) \
     -ljpeg -lwebp
 
@@ -29,7 +31,7 @@ FROM debian:forky-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_ARCH=amd64
-ARG BUILD_VERSION=0.2.1
+ARG BUILD_VERSION=0.2.2
 LABEL io.hass.name="WPE Screenshot Engine" \
       io.hass.description="Private WPE WebKit engine for Home Assistant dashboard screenshots" \
       io.hass.type="app" \
@@ -79,4 +81,4 @@ RUN chmod 0555 /usr/local/bin/wpe-screenshot-engine /usr/local/bin/run.sh \
 USER 0:0
 ENTRYPOINT ["/usr/local/bin/run.sh"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
-    CMD ["/usr/bin/wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/healthz"]
+    CMD ["/usr/bin/wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/readyz"]

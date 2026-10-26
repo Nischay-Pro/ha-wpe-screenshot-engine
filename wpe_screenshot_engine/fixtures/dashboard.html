@@ -113,6 +113,15 @@
     </main>
     <div id="alignment-pattern"></div>
     <script>
+      if (location.pathname.endsWith("/alpha")) {
+        document.documentElement.style.background = "transparent";
+        document.body.style.background = "transparent";
+        const alphaMarker = document.createElement("div");
+        alphaMarker.style.cssText =
+          "position:absolute;left:400px;top:280px;width:80px;height:48px;" +
+          "background:rgba(200,100,50,0.5)";
+        document.body.appendChild(alphaMarker);
+      }
       if (location.pathname.endsWith("/tall")) {
         document.documentElement.style.minHeight = "4050px";
         document.body.style.minHeight = "4050px";

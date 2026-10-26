@@ -25,6 +25,8 @@
 #include <wpe/wpe-platform.h>
 #include <webp/encode.h>
 
+#include "pixel_convert.h"
+
 #define DEFAULT_IMAGE_WIDTH 1280u
 #define DEFAULT_IMAGE_HEIGHT 800u
 #define MAX_FULL_DOCUMENT_SNAPSHOT_HEIGHT DEFAULT_IMAGE_HEIGHT
@@ -127,6 +129,7 @@ struct _App {
     guint webkit_process_memory_limit_mb;
     gboolean renderer_ready;
     gboolean renderer_idle_released;
+    gboolean renderer_recovery_warning_logged;
     gboolean dashboard_loaded;
     gint64 dashboard_last_capture_at_us;
     gchar *dashboard_requested_path;
@@ -925,6 +928,7 @@ on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
         WebKitURIRequest *request = action ?
             webkit_navigation_action_get_request(action) : NULL;
         const gchar *uri = request ? webkit_uri_request_get_uri(request) : NULL;
+        /* Cross-origin iframe navigation is intentionally outside the render policy. */
         if (uri && !is_same_origin_uri(app, uri)) {
             webkit_policy_decision_ignore(decision);
             app->dashboard_loaded = FALSE;
@@ -983,6 +987,7 @@ create_view(App *app)
     g_signal_connect(view, "web-process-terminated", G_CALLBACK(on_web_process_terminated), app);
     app->wpe_view = wpe_view;
     app->renderer_ready = TRUE;
+    app->renderer_recovery_warning_logged = FALSE;
     return view;
 }
 
@@ -1045,10 +1050,12 @@ app_ensure_view(App *app)
         return TRUE;
     }
 
-    if (app->renderer_idle_released)
+    if (app->renderer_idle_released) {
         g_message("Renderer was released while idle; recreating it on demand");
-    else
+    } else if (!app->renderer_recovery_warning_logged) {
         g_warning("WPE renderer is unavailable; attempting to recreate the view");
+        app->renderer_recovery_warning_logged = TRUE;
+    }
     app_recreate_view(app);
     gboolean ready = app->renderer_ready && app->view && app->wpe_view;
     if (ready)
@@ -1486,7 +1493,8 @@ start_readiness_checks(RenderRequest *request)
         request->capture_scheduled)
         return;
 
-    request->readiness_source = add_request_timeout(200, readiness_tick, request);
+    guint interval_ms = request->reused_page ? 50u : 200u;
+    request->readiness_source = add_request_timeout(interval_ms, readiness_tick, request);
     readiness_tick(request);
 }
 
@@ -1674,44 +1682,13 @@ on_tiled_scroll_restored(GObject *source, GAsyncResult *result,
     request_unref(request);
 }
 
-static void
-bgra_to_rgba(const guint8 *source, guint8 *destination)
-{
-    guint8 alpha = source[3];
-    guint red = source[2];
-    guint green = source[1];
-    guint blue = source[0];
-    if (alpha && alpha < 255) {
-        red = MIN(255u, (red * 255u + alpha / 2u) / alpha);
-        green = MIN(255u, (green * 255u + alpha / 2u) / alpha);
-        blue = MIN(255u, (blue * 255u + alpha / 2u) / alpha);
-    } else if (!alpha) {
-        red = green = blue = 0;
-    }
-    destination[0] = (guint8) red;
-    destination[1] = (guint8) green;
-    destination[2] = (guint8) blue;
-    destination[3] = alpha;
-}
-
-static void
-bgra_to_rgb_white(const guint8 *source, guint8 *destination)
-{
-    guint alpha_complement = 255u - source[3];
-    destination[0] = (guint8) MIN(255u, (guint) source[2] + alpha_complement);
-    destination[1] = (guint8) MIN(255u, (guint) source[1] + alpha_complement);
-    destination[2] = (guint8) MIN(255u, (guint) source[0] + alpha_complement);
-}
-
 static gboolean
 image_is_opaque(const guint8 *pixels, guint stride, guint width, guint height)
 {
     for (guint y = 0; y < height; ++y) {
         const guint8 *row = pixels + (gsize) y * stride;
-        for (guint x = 0; x < width; ++x) {
-            if (row[(gsize) x * 4u + 3u] != 255)
-                return FALSE;
-        }
+        if (!wpe_bgra_row_is_opaque(row, width))
+            return FALSE;
     }
     return TRUE;
 }
@@ -1804,13 +1781,9 @@ encode_png(const guint8 *source, guint source_stride, guint width, guint height,
     for (guint y = 0; y < height; ++y) {
         const guint8 *source_row = source + (gsize) y * source_stride;
         if (opaque) {
-            for (guint x = 0; x < width; ++x)
-                bgra_to_rgb_white(source_row + (gsize) x * 4u,
-                                  row + (gsize) x * 3u);
+            wpe_bgra_to_rgb_white_row(source_row, row, width);
         } else {
-            for (guint x = 0; x < width; ++x)
-                bgra_to_rgba(source_row + (gsize) x * 4u,
-                             row + (gsize) x * 4u);
+            wpe_bgra_to_rgba_row(source_row, row, width);
         }
         png_write_row(png, row);
     }
@@ -1944,9 +1917,7 @@ encode_jpeg(const guint8 *source, guint source_stride, guint width, guint height
     while (encoder->compressor.next_scanline < encoder->compressor.image_height) {
         guint y = encoder->compressor.next_scanline;
         const guint8 *src = source + (gsize) y * source_stride;
-        for (guint x = 0; x < width; ++x)
-            bgra_to_rgb_white(src + (gsize) x * 4u,
-                              encoder->row + (gsize) x * 3u);
+        wpe_bgra_to_rgb_white_row(src, encoder->row, width);
         JSAMPROW row = encoder->row;
         if (jpeg_write_scanlines(&encoder->compressor, &row, 1) != 1)
             ERREXIT(&encoder->compressor, JERR_CANT_SUSPEND);
@@ -2030,14 +2001,7 @@ encode_webp(const guint8 *source, guint source_stride, guint width, guint height
                     const guint8 *src = source + (gsize) y * source_stride;
                     uint32_t *dst = picture.argb +
                         (size_t) y * (size_t) picture.argb_stride;
-                    for (guint x = 0; x < width; ++x) {
-                        guint8 rgba[4];
-                        bgra_to_rgba(src + (gsize) x * 4u, rgba);
-                        dst[x] = ((uint32_t) rgba[3] << 24) |
-                                 ((uint32_t) rgba[0] << 16) |
-                                 ((uint32_t) rgba[1] << 8) |
-                                 (uint32_t) rgba[2];
-                    }
+                    wpe_bgra_to_webp_argb_row(src, dst, width);
                 }
                 encoded = WebPEncode(&config, &picture);
             }
@@ -2097,13 +2061,7 @@ encode_bmp(const guint8 *source, guint source_stride, guint width, guint height,
     for (guint y = 0; y < height; ++y) {
         const guint8 *src = source + (gsize) (height - 1u - y) * source_stride;
         guint8 *dst = bmp + 54u + (gsize) y * row_length;
-        for (guint x = 0; x < width; ++x) {
-            guint8 rgb[3];
-            bgra_to_rgb_white(src + (gsize) x * 4u, rgb);
-            dst[(gsize) x * 3u + 0u] = rgb[2];
-            dst[(gsize) x * 3u + 1u] = rgb[1];
-            dst[(gsize) x * 3u + 2u] = rgb[0];
-        }
+        wpe_bgra_to_bgr_white_row(src, dst, width);
     }
     return g_bytes_new_take(bmp, output_length);
 }
@@ -2173,6 +2131,9 @@ static void
 encode_task_result_free(gpointer user_data)
 {
     EncodeTaskResult *result = user_data;
+    /* g_task_propagate_pointer() returns NULL when the task is cancelled. */
+    if (!result)
+        return;
     g_clear_pointer(&result->image, g_bytes_unref);
     g_free(result);
 }
@@ -2204,6 +2165,8 @@ on_encoded_snapshot_ready(GObject *source, GAsyncResult *async_result,
     if (!current_request(request)) {
         encode_task_result_free(result);
         g_clear_error(&error);
+        g_message("Screenshot encoding discarded: request_id=%llu request no longer active",
+                  (unsigned long long) request->id);
         request_unref(request);
         return;
     }
@@ -2899,7 +2862,8 @@ handle_health(SoupServerMessage *message, App *app, const gchar *path)
         return;
     }
     if (path && !strcmp(path, "/readyz")) {
-        if (app_ensure_view(app))
+        /* Probes may recover a failed view, but must leave idle releases alone. */
+        if (app->renderer_idle_released || app_ensure_view(app))
             respond_text(message, 200, "ready\n");
         else
             respond_text(message, 503, "renderer unavailable\n");
@@ -3107,7 +3071,7 @@ init_app(App *app)
     if (!app->view)
         return FALSE;
 
-    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.2.1",
+    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.2.2",
                                   "raw-paths", TRUE, NULL);
     soup_server_add_early_handler(app->server, NULL, handle_early_request, NULL, NULL);
     soup_server_add_handler(app->server, NULL, handle_request, app, NULL);
