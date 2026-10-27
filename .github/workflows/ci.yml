@@ -109,7 +109,9 @@ jobs:
             --config "$GITHUB_WORKSPACE/tests/.devcontainer.json" \
             bash -lc 'nohup supervisor_run >/tmp/wpe-supervisor.log 2>&1 </dev/null &'
 
-          for attempt in $(seq 1 180); do
+          attempt=0
+          while [ "$attempt" -lt 180 ]; do
+            attempt=$((attempt + 1))
             if devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" \
               --config "$GITHUB_WORKSPACE/tests/.devcontainer.json" \
               ha --no-progress info --raw-json \
