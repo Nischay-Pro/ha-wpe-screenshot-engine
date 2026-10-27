@@ -178,7 +178,7 @@ Use `viewport=WIDTHxauto` to capture a full page at the requested width. Home As
 
 - **`GET /healthz`:** returns 200 while the HTTP service is running.
 - **`GET /readyz`:** returns 200 when the renderer is ready or intentionally released while idle. If renderer recreation previously failed, the probe retries and returns 503 only while recovery continues to fail. Probes do not recreate an intentionally idle renderer; a screenshot request does.
-- **`GET /capabilities?width=1280`:** reports the engine version, renderer state, supported formats, configured settings, and effective height limit for that width. It does not expose the Home Assistant URL, dashboard path, or token.
+- **`GET /capabilities`:** reports the engine version, renderer state, supported formats, configured settings, and effective height limit at the default width of 1280 px. Add `?width=WIDTH` (64–4096) to get the height limit for another width. It does not expose the Home Assistant URL, dashboard path, or token.
 
 ## Security
 
