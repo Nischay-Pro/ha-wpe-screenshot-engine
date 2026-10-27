@@ -7,7 +7,6 @@
   "separate-pull-requests": true,
   "packages": {
     ".": {
-      "component": "WPE Screenshot Engine",
       "changelog-path": "wpe_screenshot_engine/CHANGELOG.md",
       "pull-request-title-pattern": "WPE Screenshot Engine ${version}",
       "extra-files": [
@@ -21,13 +20,7 @@
         { "type": "feat", "section": "Added" },
         { "type": "fix", "section": "Fixed" },
         { "type": "perf", "section": "Changed" },
-        { "type": "deps", "section": "Changed" },
-        { "type": "docs", "section": "Changed" },
-        { "type": "refactor", "section": "Changed" },
-        { "type": "build", "section": "Changed" },
-        { "type": "ci", "section": "Changed" },
-        { "type": "test", "section": "Changed" },
-        { "type": "chore", "section": "Changed", "hidden": true }
+        { "type": "deps", "section": "Changed" }
       ]
     }
   }
