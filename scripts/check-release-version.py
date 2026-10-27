@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Keep the Home Assistant app version aligned with Release Please."""
 
 import json
