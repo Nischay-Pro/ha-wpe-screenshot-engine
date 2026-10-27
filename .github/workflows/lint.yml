@@ -10,7 +10,7 @@ permissions: {}
 jobs:
   pre-commit:
     name: Lint source and workflow files
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -29,7 +29,7 @@ jobs:
 
   home-assistant-config:
     name: Lint Home Assistant app configuration
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:

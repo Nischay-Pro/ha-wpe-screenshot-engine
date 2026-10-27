@@ -32,7 +32,7 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       github.event.workflow_run.event == 'schedule'))
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       actions: read
       contents: read
@@ -255,7 +255,7 @@ jobs:
   manifest:
     name: Publish multi-architecture manifest
     needs: [prepare, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       id-token: write
       packages: write
