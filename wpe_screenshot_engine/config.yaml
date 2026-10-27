@@ -1,6 +1,6 @@
 name: "WPE Screenshot Engine"
 slug: "wpe_screenshot_engine"
-version: "0.2.2"
+version: "0.3.0"
 description: "Headless WPE WebKit screenshot renderer for Home Assistant dashboards"
 url: "https://github.com/Nischay-Pro/ha-wpe-screenshot-engine"
 image: "ghcr.io/nischay-pro/ha-wpe-screenshot-engine"
@@ -20,6 +20,10 @@ options:
   render_deadline_seconds: 55
   dashboard_reuse_idle_seconds: 300
   webkit_process_memory_limit_mb: 512
+  max_auto_height: 12000
+  full_page_tile_wait_ms: 250
+  frontend_options_timeout_ms: 10000
+  allowed_hosts: ""
 schema:
   home_assistant_url: str
   home_assistant_ca_certificate: "str?"
@@ -29,5 +33,9 @@ schema:
   render_deadline_seconds: int(1,300)
   dashboard_reuse_idle_seconds: int(0,3600)
   webkit_process_memory_limit_mb: int(512,3072)
+  max_auto_height: int(1000,12000)
+  full_page_tile_wait_ms: int(0,5000)
+  frontend_options_timeout_ms: int(1000,60000)
+  allowed_hosts: "str?"
 map:
   - ssl:ro

@@ -51,6 +51,10 @@ if [ -e "$OPTIONS_FILE" ]; then
     RENDER_DEADLINE_SECONDS="${RENDER_DEADLINE_SECONDS:-$(read_option render_deadline_seconds)}"
     DASHBOARD_REUSE_IDLE_SECONDS="${DASHBOARD_REUSE_IDLE_SECONDS:-$(read_option dashboard_reuse_idle_seconds)}"
     WEBKIT_PROCESS_MEMORY_LIMIT_MB="${WEBKIT_PROCESS_MEMORY_LIMIT_MB:-$(read_option webkit_process_memory_limit_mb)}"
+    MAX_AUTO_HEIGHT="${MAX_AUTO_HEIGHT:-$(read_optional_option max_auto_height)}"
+    FULL_PAGE_TILE_WAIT_MS="${FULL_PAGE_TILE_WAIT_MS:-$(read_optional_option full_page_tile_wait_ms)}"
+    FRONTEND_OPTIONS_TIMEOUT_MS="${FRONTEND_OPTIONS_TIMEOUT_MS:-$(read_optional_option frontend_options_timeout_ms)}"
+    ALLOWED_HOSTS="${ALLOWED_HOSTS:-$(read_optional_option allowed_hosts)}"
 else
     TOKEN_SOURCE="${HA_TOKEN_FILE:-/run/secrets/ha_token}"
 fi
@@ -104,6 +108,10 @@ export EXPECTED_TEXT="${EXPECTED_TEXT-}"
 export RENDER_DEADLINE_SECONDS="${RENDER_DEADLINE_SECONDS:-55}"
 export DASHBOARD_REUSE_IDLE_SECONDS="${DASHBOARD_REUSE_IDLE_SECONDS:-300}"
 export WEBKIT_PROCESS_MEMORY_LIMIT_MB="${WEBKIT_PROCESS_MEMORY_LIMIT_MB:-512}"
+export MAX_AUTO_HEIGHT="${MAX_AUTO_HEIGHT:-12000}"
+export FULL_PAGE_TILE_WAIT_MS="${FULL_PAGE_TILE_WAIT_MS:-250}"
+export FRONTEND_OPTIONS_TIMEOUT_MS="${FRONTEND_OPTIONS_TIMEOUT_MS:-10000}"
+export ALLOWED_HOSTS="${ALLOWED_HOSTS:-}"
 export WPE_PLATFORM=headless
 
 if [ "${WPE_FIXTURE_MODE:-0}" != "1" ]; then

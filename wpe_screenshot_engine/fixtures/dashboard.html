@@ -73,6 +73,15 @@
         height: 80px;
         background: #f0d020;
       }
+      #tile-lazy-marker {
+        display: none;
+        position: absolute;
+        left: 0;
+        top: 950px;
+        width: 64px;
+        height: 100px;
+        background: #d02030;
+      }
       #wait-marker {
         position: absolute;
         left: 500px;
@@ -112,6 +121,8 @@
       <canvas id="chart" width="320" height="120" aria-label="Fixture chart"></canvas>
     </main>
     <div id="alignment-pattern"></div>
+    <div id="beyond-cap"></div>
+    <div id="tile-lazy-marker"></div>
     <script>
       if (location.pathname.endsWith("/alpha")) {
         document.documentElement.style.background = "transparent";
@@ -130,11 +141,37 @@
           "#20d050 3970px, #123456 3970px)";
         document.querySelector("#beyond-cap").style.display = "block";
       }
+      if (location.pathname.endsWith("/over-limit")) {
+        document.documentElement.style.minHeight = "13000px";
+        document.body.style.minHeight = "13000px";
+      }
+      if (location.pathname.endsWith("/tile-wait")) {
+        document.documentElement.style.minHeight = "2200px";
+        document.body.style.minHeight = "2200px";
+        const marker = document.querySelector("#tile-lazy-marker");
+        marker.style.display = "block";
+        window.addEventListener("scroll", () => {
+          setTimeout(() => { marker.style.background = "#20d050"; }, 150);
+        }, { once: true });
+      }
+      if (location.pathname.endsWith("/tiling-auth")) {
+        document.documentElement.style.minHeight = "6000px";
+        document.body.style.minHeight = "6000px";
+        window.addEventListener("scroll", () => {
+          if (window.scrollY > 0) {
+            location.href = "/auth/authorize?client_id=fixture";
+          }
+        }, { once: true });
+      }
+      const fractionalEdge = /\/fractional-edge(?:-\d+)?$/.test(location.pathname);
       if (location.pathname.endsWith("/rounding-short") ||
-          location.pathname.endsWith("/rounding")) {
+          location.pathname.endsWith("/rounding") ||
+          fractionalEdge) {
         const roundingHeight = location.pathname.endsWith("/rounding-short")
           ? "1143px"
-          : "1146px";
+          : fractionalEdge
+            ? "1281.8px"
+            : "1146px";
         document.documentElement.style.minHeight = roundingHeight;
         document.body.style.minHeight = roundingHeight;
         document.querySelector("#below-fold").style.display = "none";
@@ -159,6 +196,13 @@
         inner.innerHTML = "<div style='height:6000px'>Inner scrolling content</div>";
         document.body.appendChild(inner);
       }
+      if (location.pathname.endsWith("/no-scroll-tall")) {
+        document.documentElement.style.minHeight = "1800px";
+        document.body.style.minHeight = "1800px";
+        document.documentElement.style.overflow = "hidden";
+        document.body.style.overflow = "hidden";
+        window.scrollTo = () => {};
+      }
       if (/\/alignment(?:-ref-\d+)?$/.test(location.pathname)) {
         document.documentElement.style.minHeight = "6000px";
         document.body.style.minHeight = "6000px";
@@ -175,6 +219,13 @@
       if (location.pathname.endsWith("/about-blank")) {
         setTimeout(() => { location.href = "about:blank"; }, 10);
       }
+      if (location.pathname.endsWith("/clear-auth")) {
+        localStorage.removeItem("hassTokens");
+      }
+      if (location.pathname.endsWith("/auth-retry") &&
+          !localStorage.getItem("hassTokens")) {
+        history.replaceState(null, "", "/auth/authorize?client_id=fixture");
+      }
       if (location.pathname.endsWith("/redirect-root")) {
         history.replaceState(null, "", "/lovelace/redirect-final");
       }
@@ -187,15 +238,33 @@
       fixtureHa.hass = {
         language: "en",
         selectedTheme: { theme: "Default", dark: true },
+        themes: {
+          theme: "Default",
+          darkMode: true,
+          themes: {
+            Default: {},
+            "Graphite E-ink Light": {},
+          },
+        },
         connection: {
           sendMessagePromise(message) {
-            if (message.type === "frontend/set_user_data" && message.key === "theme") {
-              localStorage.setItem("fixture-server-theme", JSON.stringify(message.value));
+            if (message.type === "frontend/set_user_data") {
+              if (message.key === "theme") {
+                localStorage.setItem("fixture-server-theme", JSON.stringify(message.value));
+              } else if (message.key === "language") {
+                localStorage.setItem("fixture-server-language", message.value);
+              }
             }
             return Promise.resolve();
           },
         },
       };
+      if (location.pathname.endsWith("/no-themes")) {
+        delete fixtureHa.hass.themes;
+      }
+      if (location.pathname.endsWith("/default-theme")) {
+        fixtureHa.hass.themes.themes = {};
+      }
       const storedTheme = localStorage.getItem("fixture-server-theme") ||
         localStorage.getItem("selectedTheme");
       if (storedTheme) {
@@ -205,19 +274,21 @@
         document.querySelector("#options-marker").style.background =
           saved.theme === "Graphite E-ink Light" && saved.dark === true
             ? "#20d050"
-            : saved.theme === "Default" && saved.dark === true
+            : String(saved.theme).toLowerCase() === "default" && saved.dark === true
               ? "#2040d0"
               : "#d02030";
       }
-      const storedLanguage = localStorage.getItem("selectedLanguage");
+      const storedLanguage = localStorage.getItem("fixture-server-language") ||
+        localStorage.getItem("selectedLanguage");
       if (storedLanguage) {
         document.documentElement.dataset.fixtureLanguage = storedLanguage;
         document.querySelector("#language-marker").style.background =
           storedLanguage === "nl" ? "#20d050" : "#2040d0";
       }
       fixtureHa._selectLanguage = (language, saveToBackend) => {
-        fixtureHa.hass.language = language;
-        document.documentElement.lang = language;
+        if (language.toLowerCase().startsWith("xx")) return;
+        fixtureHa.hass.language = language.replace(/_/g, "-").toLowerCase();
+        document.documentElement.lang = language.replace(/_/g, "-");
         document.documentElement.dataset.fixtureLanguage = language;
         localStorage.setItem("selectedLanguage", language);
         if (saveToBackend) {
@@ -228,39 +299,50 @@
           });
         }
         document.querySelector("#language-marker").style.background =
-          language === "nl" ? "#20d050" : "#2040d0";
+          language.toLowerCase().startsWith("nl") ? "#20d050" : "#2040d0";
       };
       fixtureHa.addEventListener("hass-language-select", event => {
-        fixtureHa._selectLanguage(event.detail, false);
+        const language = event.detail;
+        setTimeout(() => fixtureHa._selectLanguage(language, true), 75);
       });
       fixtureHa.addEventListener("settheme", event => {
-        if (Object.prototype.hasOwnProperty.call(event.detail, "theme")) {
-          document.documentElement.dataset.fixtureTheme = event.detail.theme;
-        }
-        if (Object.prototype.hasOwnProperty.call(event.detail, "dark")) {
-          document.documentElement.dataset.fixtureDark = String(event.detail.dark);
-        }
-        fixtureHa.hass.selectedTheme = {
-          ...fixtureHa.hass.selectedTheme,
-          ...event.detail,
-        };
-        localStorage.setItem(
-          "selectedTheme",
-          JSON.stringify(fixtureHa.hass.selectedTheme),
-        );
-        fixtureHa.hass.connection.sendMessagePromise({
-          type: "frontend/set_user_data",
-          key: "theme",
-          value: fixtureHa.hass.selectedTheme,
-        });
-        const theme = document.documentElement.dataset.fixtureTheme;
-        const dark = document.documentElement.dataset.fixtureDark;
-        const marker = document.querySelector("#options-marker");
-        marker.style.background = theme === "Graphite E-ink Light" && dark === "true"
-          ? "#20d050"
-          : theme === "Default" && dark === "true"
-            ? "#2040d0"
-            : "#d02030";
+        const detail = event.detail;
+        setTimeout(() => {
+          const ignoreTheme = location.pathname.endsWith("/ignore-theme") &&
+            Object.prototype.hasOwnProperty.call(detail, "theme");
+          const ignoreDark = location.pathname.endsWith("/ignore-dark") &&
+            Object.prototype.hasOwnProperty.call(detail, "dark");
+          if (ignoreTheme || ignoreDark) return;
+          if (Object.prototype.hasOwnProperty.call(detail, "theme")) {
+            document.documentElement.dataset.fixtureTheme = detail.theme;
+            fixtureHa.hass.themes.theme = detail.theme;
+          }
+          if (Object.prototype.hasOwnProperty.call(detail, "dark")) {
+            document.documentElement.dataset.fixtureDark = String(detail.dark);
+            fixtureHa.hass.themes.darkMode = detail.dark;
+          }
+          fixtureHa.hass.selectedTheme = {
+            ...fixtureHa.hass.selectedTheme,
+            ...detail,
+          };
+          localStorage.setItem(
+            "selectedTheme",
+            JSON.stringify(fixtureHa.hass.selectedTheme),
+          );
+          fixtureHa.hass.connection.sendMessagePromise({
+            type: "frontend/set_user_data",
+            key: "theme",
+            value: fixtureHa.hass.selectedTheme,
+          });
+          const theme = document.documentElement.dataset.fixtureTheme;
+          const dark = document.documentElement.dataset.fixtureDark;
+          const marker = document.querySelector("#options-marker");
+          marker.style.background = theme === "Graphite E-ink Light" && dark === "true"
+            ? "#20d050"
+            : String(theme).toLowerCase() === "default" && dark === "true"
+              ? "#2040d0"
+              : "#d02030";
+        }, 75);
       });
       const ready = document.querySelector("#fixture-ready");
       if (location.pathname.endsWith("/tall")) {
