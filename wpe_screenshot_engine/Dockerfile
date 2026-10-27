@@ -31,7 +31,7 @@ FROM debian:forky-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_ARCH=amd64
-ARG BUILD_VERSION=0.2.2
+ARG BUILD_VERSION=0.3.0
 LABEL io.hass.name="WPE Screenshot Engine" \
       io.hass.description="Private WPE WebKit engine for Home Assistant dashboard screenshots" \
       io.hass.type="app" \
@@ -65,6 +65,7 @@ ENV WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \
     XDG_CACHE_HOME=/tmp/wpe-cache \
     TMPDIR=/tmp \
     WPE_PLATFORM=headless \
+    WPE_ENGINE_VERSION=${BUILD_VERSION} \
     MALLOC_ARENA_MAX=2 \
     MALLOC_TRIM_THRESHOLD_=65536 \
     PORT=8080

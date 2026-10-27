@@ -75,3 +75,65 @@ jobs:
         env:
           WPE_IMAGE: ${{ matrix.image }}:ci-${{ github.sha }}
         run: sh tests/run_mcp_fixture_integration.sh
+
+  supervisor-install:
+    name: Home Assistant Supervisor install integration
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Dev Container CLI
+        run: npm install --global @devcontainers/cli
+
+      - name: Start Home Assistant apps devcontainer
+        run: >-
+          devcontainer up --workspace-folder "$GITHUB_WORKSPACE"
+          --config "$GITHUB_WORKSPACE/tests/.devcontainer.json"
+
+      - name: Start Home Assistant Supervisor
+        shell: bash
+        run: |
+          devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" \
+            --config "$GITHUB_WORKSPACE/tests/.devcontainer.json" \
+            bash -lc 'nohup supervisor_run >/tmp/wpe-supervisor.log 2>&1 </dev/null &'
+
+          for attempt in $(seq 1 180); do
+            if devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" \
+              --config "$GITHUB_WORKSPACE/tests/.devcontainer.json" \
+              ha --no-progress info --raw-json \
+              | jq -e '.data.state == "running"' >/dev/null 2>&1; then
+              echo "Home Assistant Supervisor is running."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          devcontainer exec --workspace-folder "$GITHUB_WORKSPACE" \
+            --config "$GITHUB_WORKSPACE/tests/.devcontainer.json" \
+            bash -lc 'tail -80 /tmp/wpe-supervisor.log' || true
+          echo "Home Assistant Supervisor did not become ready." >&2
+          exit 1
+
+      - name: Install current app through Supervisor
+        run: >-
+          devcontainer exec --workspace-folder "$GITHUB_WORKSPACE"
+          --config "$GITHUB_WORKSPACE/tests/.devcontainer.json"
+          sh tests/run_supervisor_install_integration.sh
+
+      - name: Stop Home Assistant apps devcontainer
+        if: always()
+        run: >-
+          devcontainer down --workspace-folder "$GITHUB_WORKSPACE"
+          --config "$GITHUB_WORKSPACE/tests/.devcontainer.json"

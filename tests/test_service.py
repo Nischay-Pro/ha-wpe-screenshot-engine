@@ -61,6 +61,26 @@ def request_at(port: int, path: str, *, method: str = "GET", timeout: float = 10
             error.close()
 
 
+def request_from(
+    port: int,
+    path: str,
+    source_address: str,
+    *,
+    host: str = "127.0.0.1",
+    headers: dict[str, str] | None = None,
+    timeout: float = 10.0,
+):
+    connection = http.client.HTTPConnection(
+        host, port, timeout=timeout, source_address=(source_address, 0)
+    )
+    try:
+        connection.request("GET", path, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, response.headers, response.read()
+    finally:
+        connection.close()
+
+
 def request(path: str, *, method: str = "GET", timeout: float = 10.0):
     return request_at(_ServiceTests.port, path, method=method, timeout=timeout)
 
@@ -101,7 +121,7 @@ def decode_rgba_png(data: bytes) -> tuple[int, int, bytes]:
         6,
     ):
         raise AssertionError("PNG is not non-interlaced 8-bit RGB or RGBA")
-    if not (0 < width <= 4096 and 0 < height <= 4096):
+    if not (0 < width <= 4096 and 0 < height <= 12000):
         raise AssertionError("PNG dimensions exceed test bounds")
 
     compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
@@ -199,10 +219,14 @@ class _ServiceTests(unittest.TestCase):
             "2",
             "--network",
             "host",
+            "--add-host",
+            "fixture.local:127.0.0.1",
             "--env",
             "WPE_FIXTURE_MODE=1",
             "--env",
-            "HA_URL=http://fixture.local",
+            "WPE_FIXTURE_AUTH_BOOTSTRAP=1",
+            "--env",
+            f"HA_URL=http://fixture.local:{cls.port}",
             "--env",
             "DASHBOARD_PATH=lovelace/energy",
             "--env",
@@ -217,6 +241,10 @@ class _ServiceTests(unittest.TestCase):
             "RENDER_DEADLINE_SECONDS=5",
             "--env",
             "DASHBOARD_REUSE_IDLE_SECONDS=300",
+            "--env",
+            "FULL_PAGE_TILE_WAIT_MS=300",
+            "--env",
+            "FRONTEND_OPTIONS_TIMEOUT_MS=1000",
             IMAGE,
         )
 
@@ -256,6 +284,191 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(headers.get_content_type(), "text/plain")
         status, _, body = request("/readyz")
         self.assertEqual((status, body), (200, b"ready\n"))
+        status, _, body = request(ROUTE + "?wait=0")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        logs = docker("logs", self.name, check=False)
+        self.assertIn(
+            "Home Assistant token bootstrap script removed from WebKit after renderer readiness",
+            logs.stdout + logs.stderr,
+        )
+
+    def test_a_first_load_auth_failure_does_not_retry(self) -> None:
+        status, _, body = request(
+            "/lovelace/auth-fails-first?viewport=64x64&wait=0", timeout=5
+        )
+        self.assertEqual(status, 502, body.decode("utf-8", "replace"))
+        self.assertIn(b"authentication failed", body)
+        logs = docker("logs", self.name, check=False)
+        log_text = logs.stdout + logs.stderr
+        self.assertNotIn("retrying request once with a fresh token bootstrap", log_text)
+
+    def test_tiling_auth_redirect_does_not_retry_partial_capture(self) -> None:
+        status, _, body = request(
+            "/lovelace/tiling-auth?viewport=64xauto&zoom=1.0&wait=0", timeout=8
+        )
+        self.assertEqual(status, 502, body.decode("utf-8", "replace"))
+        self.assertIn(b"authentication failed", body)
+        logs = docker("logs", self.name, check=False)
+        log_text = logs.stdout + logs.stderr
+        self.assertNotIn("retrying request once with a fresh token bootstrap", log_text)
+
+    def test_z_cleared_auth_storage_retries_once_without_exposing_a_502(self) -> None:
+        status, _, body = request("/lovelace/clear-auth?viewport=64x64&wait=0")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(decode_rgba_png(body)[:2], (64, 64))
+
+        status, headers, body = request("/lovelace/auth-retry?viewport=64x64&wait=0")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "image/png")
+        self.assertEqual(decode_rgba_png(body)[:2], (64, 64))
+        logs = docker("logs", self.name, check=False)
+        log_text = logs.stdout + logs.stderr
+        self.assertIn(
+            "retrying request once with a fresh token bootstrap",
+            log_text,
+        )
+        self.assertGreaterEqual(
+            log_text.count(
+                "Home Assistant token bootstrap script removed from WebKit after renderer readiness"
+            ),
+            2,
+        )
+
+    def test_capabilities_reports_safe_limits_for_requested_width(self) -> None:
+        status, headers, body = request("/capabilities?width=1280")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "application/json")
+        payload = json.loads(body)
+        self.assertEqual(payload["api_version"], 1)
+        self.assertEqual(payload["response_mode"], "single-image")
+        self.assertEqual(payload["settings"]["width_px"], 1280)
+        self.assertEqual(payload["settings"]["effective_height_cap_px"], 12000)
+        self.assertEqual(payload["settings"]["full_page_tile_wait_ms"], 300)
+        self.assertEqual(payload["settings"]["frontend_options_timeout_ms"], 1000)
+        self.assertFalse(payload["security"]["source_ip_allowlist_enabled"])
+        self.assertTrue(payload["features"]["full_page_png_streaming"])
+        self.assertNotIn("home_assistant_url", payload)
+        self.assertNotIn("token", payload)
+
+        status, _, body = request("/capabilities?width=4096")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(json.loads(body)["settings"]["effective_height_cap_px"], 3840)
+        status, _, body = request("/capabilities?width=4097")
+        self.assertEqual(status, 422)
+        self.assertIn(b"width=64..4096", body)
+
+    def test_ipv6_listener_accepts_loopback_when_available(self) -> None:
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+                probe.bind(("::1", 0))
+        except OSError as error:
+            self.skipTest(f"IPv6 loopback is unavailable: {error}")
+
+        status, _, body = request_from(self.port, "/healthz", "::1", host="::1")
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+
+    def test_allowed_hosts_filter_peer_ip_without_trusting_forwarded_headers(
+        self,
+    ) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        name = f"wpe-allowed-hosts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        allowed_hosts = "127.0.0.0/31,::1/128"
+        docker(
+            "run",
+            "--detach",
+            "--init",
+            "--name",
+            name,
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,size=512m",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "SETUID",
+            "--cap-add",
+            "SETGID",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "128",
+            "--memory",
+            "768m",
+            "--cpus",
+            "2",
+            "--network",
+            "host",
+            "--env",
+            "WPE_FIXTURE_MODE=1",
+            "--env",
+            "HA_URL=http://fixture.local",
+            "--env",
+            "DASHBOARD_PATH=lovelace/energy",
+            "--env",
+            f"PORT={port}",
+            "--env",
+            f"ALLOWED_HOSTS={allowed_hosts}",
+            "--env",
+            "RENDER_DEADLINE_SECONDS=5",
+            IMAGE,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    if request_at(port, "/readyz", timeout=1)[0] == 200:
+                        break
+                except (OSError, urllib.error.URLError):
+                    pass
+                time.sleep(0.2)
+            else:
+                logs = docker("logs", name, check=False)
+                self.fail(
+                    "allowlisted fixture did not become ready:\n"
+                    + logs.stdout
+                    + logs.stderr
+                )
+
+            status, headers, body = request_from(
+                port,
+                ROUTE + "?viewport=64x64&zoom=1.0&wait=0&format=png",
+                "127.0.0.1",
+            )
+            self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+            self.assertEqual(headers.get_content_type(), "image/png")
+
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+                    probe.bind(("::1", 0))
+            except OSError:
+                ipv6_available = False
+            else:
+                ipv6_available = True
+            if ipv6_available:
+                status, headers, body = request_from(
+                    port,
+                    ROUTE + "?viewport=64x64&zoom=1.0&wait=0&format=png",
+                    "::1",
+                    host="::1",
+                )
+                self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+                self.assertEqual(headers.get_content_type(), "image/png")
+
+            status, _, body = request_from(
+                port,
+                ROUTE + "?viewport=64x64&zoom=1.0&wait=0&format=png",
+                "127.0.0.2",
+                headers={"X-Forwarded-For": "127.0.0.1"},
+            )
+            self.assertEqual(status, 403, body.decode("utf-8", "replace"))
+            self.assertIn(b"Client IP is not allowed", body)
+
+            status, _, body = request_from(port, "/readyz", "127.0.0.2")
+            self.assertEqual((status, body), (200, b"ready\n"))
+        finally:
+            docker("rm", "--force", name, check=False)
 
     def test_normalized_health_routes_do_not_start_screenshots(self) -> None:
         before = docker("logs", self.name, check=False)
@@ -654,17 +867,22 @@ class _ServiceTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body.decode("utf-8", "replace"))
         self.assertEqual(headers.get_content_type(), "image/png")
-        self.assertEqual(headers.get("X-WPE-Screenshot-Truncated"), "true")
         width, height, pixels = decode_rgba_png(body)
-        self.assertEqual((width, height), (64, 4000))
-        self.assertEqual(pixel(pixels, width, 50, 3900), (32, 208, 80, 255))
+        self.assertEqual((width, height), (64, 4090))
+        self.assertEqual(pixel(pixels, width, 50, 4020), (240, 208, 32, 255))
+
+        status, _, body = request(
+            "/lovelace/over-limit?viewport=64xauto&zoom=1.0&wait=0&format=png"
+        )
+        self.assertEqual(status, 413, body.decode("utf-8", "replace"))
+        self.assertIn(b"no clipped image was returned", body)
 
         status, _, body = request(
             "/lovelace/fixed-header?viewport=64xauto&zoom=1.0&wait=0&format=png"
         )
         self.assertEqual(status, 200, body.decode("utf-8", "replace"))
         width, height, pixels = decode_rgba_png(body)
-        self.assertEqual((width, height), (64, 4000))
+        self.assertEqual((width, height), (64, 4050))
         self.assertEqual(pixel(pixels, width, 5, 5), (36, 63, 96, 255))
         self.assertEqual(
             pixel(pixels, width, 5, 805),
@@ -677,6 +895,12 @@ class _ServiceTests(unittest.TestCase):
         )
         self.assertEqual(status, 422, body.decode("utf-8", "replace"))
         self.assertIn(b"vertically scrolling inner containers", body)
+
+        status, _, body = request(
+            "/lovelace/no-scroll-tall?viewport=64xauto&zoom=1.0&wait=0&format=png"
+        )
+        self.assertEqual(status, 422, body.decode("utf-8", "replace"))
+        self.assertIn(b"cannot reach the measured height", body)
 
         for zoom, expected_height, marker_y, marker_x in (
             # At 0.5 zoom the configured 800 px viewport covers 1600 CSS px,
@@ -708,12 +932,66 @@ class _ServiceTests(unittest.TestCase):
                 self.assertGreaterEqual(height, 800)
                 self.assertLessEqual(height, 802)
 
+        status, headers, body = request(
+            "/lovelace/fractional-edge?viewport=64xauto&zoom=1.25&wait=0&format=png"
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "image/png")
+        width, height, pixels = decode_rgba_png(body)
+        self.assertEqual((width, height), (64, 1603))
+        self.assertEqual(
+            pixel(pixels, width, 5, height - 1),
+            (18, 52, 86, 255),
+            "rounding rows must repeat the last captured page row",
+        )
+
+        status, headers, body = request(
+            "/lovelace/fractional-edge?viewport=64xauto&zoom=1.25&wait=0&format=bmp"
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "image/bmp")
+        self.assertEqual(body[:2], b"BM")
+        self.assertEqual(struct.unpack_from("<ii", body, 18), (64, 1603))
+        self.assertEqual(
+            body[54:57],
+            bytes((0x56, 0x34, 0x12)),
+            "buffered formats must repeat the final captured row instead of exposing the zeroed buffer tail",
+        )
+
+        for zoom, expected_height in (("3.0", 3846), ("5.0", 6410)):
+            with self.subTest(high_zoom_rounding=zoom):
+                status, _, body = request(
+                    f"/lovelace/fractional-edge-{zoom[:-2]}?viewport=64xauto&zoom={zoom}&wait=0&format=png",
+                    timeout=15,
+                )
+                self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+                width, height, pixels = decode_rgba_png(body)
+                self.assertEqual((width, height), (64, expected_height))
+                self.assertEqual(
+                    pixel(pixels, width, 5, height - 1),
+                    (18, 52, 86, 255),
+                    "high-zoom rounding must complete the declared page height with real page pixels",
+                )
+
+        status, headers, body = request(
+            "/lovelace/fractional-edge-5?viewport=64xauto&zoom=5.0&wait=0&format=bmp",
+            timeout=15,
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "image/bmp")
+        self.assertEqual(struct.unpack_from("<ii", body, 18), (64, 6410))
+        self.assertEqual(
+            body[54:57],
+            bytes((0x56, 0x34, 0x12)),
+            "high-zoom buffered output must not have a white or transparent tail",
+        )
+
         status, _, body = request(
             "/lovelace/alignment?viewport=64xauto&zoom=0.7&wait=0&format=png"
         )
         self.assertEqual(status, 200, body.decode("utf-8", "replace"))
         width, height, tiled_pixels = decode_rgba_png(body)
-        self.assertEqual((width, height), (64, 4000))
+        self.assertEqual((width, height), (64, 4200))
         row_bytes = width * 4
         logs = docker("logs", self.name, check=False)
         log_lines = (logs.stdout + logs.stderr).splitlines()
@@ -734,6 +1012,8 @@ class _ServiceTests(unittest.TestCase):
                 source_y, rows, next_offset = map(int, match.groups())
                 tiles.append((next_offset - rows, source_y, rows))
         self.assertGreater(len(tiles), 1, "fixture must exercise tiled capture")
+        self.assertIn("Full-page PNG stream started", logs.stdout + logs.stderr)
+        self.assertIn("Full-page PNG tile encoded", logs.stdout + logs.stderr)
         for offset, source_y, rows in tiles:
             with self.subTest(fractional_zoom_tile_offset=offset):
                 status, _, reference_body = request(
@@ -757,6 +1037,18 @@ class _ServiceTests(unittest.TestCase):
                     f"stitched rows at document offset {offset} must match an independent viewport capture cropped at source row {source_y}",
                 )
 
+        status, _, body = request(
+            "/lovelace/tile-wait?viewport=64xauto&zoom=1.0&wait=0&format=png"
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        width, height, pixels = decode_rgba_png(body)
+        self.assertEqual((width, height), (64, 2200))
+        self.assertEqual(
+            pixel(pixels, width, 5, 1000),
+            (32, 208, 80, 255),
+            "the per-tile settle interval must allow the lazy marker to paint",
+        )
+
     def test_about_blank_navigation_is_not_misclassified_as_cross_origin(self) -> None:
         status, headers, body = request(
             "/lovelace/about-blank?viewport=64x64&zoom=1.0&wait=500&format=png"
@@ -777,6 +1069,12 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual((width, height), (640, 480))
         self.assertEqual(pixel(pixels, width, 100, 380), (32, 208, 80, 255))
         self.assertEqual(pixel(pixels, width, 270, 380), (32, 208, 80, 255))
+
+        status, _, body = request(
+            ROUTE + "?viewport=640x480&zoom=1.0&wait=0&format=png&lang=nl-NL"
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(decode_rgba_png(body)[:2], (640, 480))
 
         status, _, body = request(
             ROUTE + "?viewport=640x480&zoom=1.0&wait=0&format=png"
@@ -829,9 +1127,8 @@ class _ServiceTests(unittest.TestCase):
             + "?viewport=640x480&zoom=1.25&wait=0&format=png"
             + "&theme=Graphite%2BE-ink%2BLight&dark&lang=nl"
         )
-        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
-        _, _, pixels = decode_rgba_png(body)
-        self.assertEqual(pixel(pixels, 640, 100, 380), (208, 32, 48, 255))
+        self.assertEqual(status, 422, body.decode("utf-8", "replace"))
+        self.assertIn(b"requested Home Assistant theme is not available", body)
 
         formats = (
             ("jpeg", "image/jpeg", b"\xff\xd8\xff"),
@@ -862,6 +1159,68 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(status, 502, body.decode("utf-8", "replace"))
         self.assertIn(b"options could not be applied", body)
 
+    def test_builtin_default_theme_is_valid_without_a_custom_theme_entry(self) -> None:
+        status, headers, body = request(
+            "/lovelace/default-theme?viewport=640x480&wait=0&theme=default&dark=true"
+        )
+        self.assertEqual(status, 200, body.decode("utf-8", "replace"))
+        self.assertEqual(headers.get_content_type(), "image/png")
+        width, height, pixels = decode_rgba_png(body)
+        self.assertEqual((width, height), (640, 480))
+        self.assertEqual(
+            pixel(pixels, width, 100, 300),
+            (32, 64, 208, 255),
+            "the built-in default theme can be used even when themes is empty",
+        )
+
+    def test_unsupported_language_fails_fast_with_client_error(self) -> None:
+        started_at = time.monotonic()
+        status, _, body = request(
+            ROUTE + "?viewport=640x480&zoom=1.0&wait=0&format=png&lang=xx-INVALID",
+            timeout=9,
+        )
+        elapsed = time.monotonic() - started_at
+        self.assertEqual(status, 422, body.decode("utf-8", "replace"))
+        self.assertIn(b"did not apply the requested language", body)
+        self.assertLess(
+            elapsed, 9, "unsupported language should not wait for render deadline"
+        )
+
+    def test_unknown_unloaded_and_unapplied_theme_overrides_use_distinct_errors(
+        self,
+    ) -> None:
+        status, _, body = request(
+            ROUTE + "?viewport=640x480&wait=0&theme=Not+Installed",
+            timeout=5,
+        )
+        self.assertEqual(status, 422, body.decode("utf-8", "replace"))
+        self.assertIn(b"requested Home Assistant theme is not available", body)
+
+        started_at = time.monotonic()
+        status, _, body = request(
+            "/lovelace/no-themes?viewport=640x480&wait=0&theme=Default",
+            timeout=5,
+        )
+        elapsed = time.monotonic() - started_at
+        self.assertEqual(status, 504, body.decode("utf-8", "replace"))
+        self.assertIn(b"theme data did not load", body)
+        self.assertLess(elapsed, 5, "missing theme data should use its options timeout")
+
+        for route, query, label in (
+            ("ignore-theme", "&theme=Graphite+E-ink+Light", "theme"),
+            ("ignore-dark", "&dark=false", "dark mode"),
+        ):
+            with self.subTest(frontend_option=label):
+                started_at = time.monotonic()
+                status, _, body = request(
+                    f"/lovelace/{route}?viewport=640x480&wait=0{query}",
+                    timeout=5,
+                )
+                elapsed = time.monotonic() - started_at
+                self.assertEqual(status, 422, body.decode("utf-8", "replace"))
+                self.assertIn(b"did not apply the requested theme or dark mode", body)
+                self.assertLess(elapsed, 5)
+
     def test_wait_parameter_allows_deferred_dashboard_paint(self) -> None:
         status, headers, body = request(
             "/lovelace/wait-delay?viewport=640x480&zoom=1.0&wait=1200&format=png"
@@ -884,6 +1243,8 @@ class _ServiceTests(unittest.TestCase):
             "/laundry-dashboard/50%25?wait=0",
             "/laundry-dashboard/plus%2Bmark?wait=0",
             "/laundry-dashboard/foo..bar?wait=0",
+            "/lovelace/./energy?wait=0",
+            "/lovelace/%2e/energy?wait=0",
         ):
             with self.subTest(route=route):
                 status, headers, body = request(route)
@@ -1221,6 +1582,8 @@ class _ServiceTests(unittest.TestCase):
         worker = threading.Thread(target=capture)
         worker.start()
         time.sleep(0.1)
+        status, _, body = request(ROUTE + "?viewport=wide")
+        self.assertEqual(status, 400, body.decode("utf-8", "replace"))
         status, headers, _ = request(ROUTE + "?wait=0")
         self.assertEqual(status, 503)
         self.assertEqual(headers.get("Retry-After"), "1")
@@ -1305,6 +1668,7 @@ class _ServiceTests(unittest.TestCase):
                 )
                 logs = docker("logs", self.name, check=False)
                 self.assertIn("keeping loaded dashboard", logs.stdout + logs.stderr)
+                self.assertNotIn("Source ID", logs.stdout + logs.stderr)
                 return
             self.assertEqual(status, 503, body.decode("utf-8", "replace"))
             time.sleep(0.05)
@@ -1519,7 +1883,11 @@ class _ServiceTests(unittest.TestCase):
             '"expected_text":"Energy at a glance",'
             '"render_deadline_seconds":2,'
             '"dashboard_reuse_idle_seconds":300,'
-            '"webkit_process_memory_limit_mb":512}'
+            '"webkit_process_memory_limit_mb":512,'
+            '"max_auto_height":7000,'
+            '"full_page_tile_wait_ms":400,'
+            '"frontend_options_timeout_ms":1250,'
+            '"allowed_hosts":"0.0.0.0/0,::/0"}'
         )
         startup = (
             "printf '%s' '"
@@ -1585,6 +1953,16 @@ class _ServiceTests(unittest.TestCase):
                 "exec", name, "stat", "-c", "%u:%a", "/data/options.json"
             ).stdout.strip()
             self.assertEqual(options_mode, "0:600")
+            status, _, capabilities = request_at(port, "/capabilities?width=1280")
+            self.assertEqual(status, 200, capabilities.decode("utf-8", "replace"))
+            settings = json.loads(capabilities)["settings"]
+            self.assertEqual(settings["configured_max_auto_height_px"], 7000)
+            self.assertEqual(settings["effective_height_cap_px"], 7000)
+            self.assertEqual(settings["full_page_tile_wait_ms"], 400)
+            self.assertEqual(settings["frontend_options_timeout_ms"], 1250)
+            self.assertTrue(
+                json.loads(capabilities)["security"]["source_ip_allowlist_enabled"]
+            )
             token_file_state = (
                 docker(
                     "exec",
@@ -2010,21 +2388,31 @@ class _ServiceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
         self.assertIn("configuration error", result.stderr)
 
-    def test_symlink_token_path_is_rejected(self) -> None:
+    def test_symlink_token_path_to_regular_file_is_supported(self) -> None:
         with tempfile.TemporaryDirectory(prefix="wpe-symlink-token-") as secret_dir:
             target = os.path.join(secret_dir, "real-token")
             token_path = os.path.join(secret_dir, "ha_token")
+            os.chmod(secret_dir, 0o755)
             with open(target, "w", encoding="utf-8") as token_file:
                 token_file.write("fixture-token")
             os.chmod(target, 0o444)
-            os.symlink(target, token_path)
-            result = docker(
+            os.symlink("real-token", token_path)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            name = f"wpe-symlink-token-{os.getpid()}"
+            docker(
                 "run",
+                "--detach",
                 "--rm",
+                "--name",
+                name,
                 "--user",
                 "10001:10001",
                 "--entrypoint",
                 "/usr/local/bin/wpe-screenshot-engine",
+                "--publish",
+                f"127.0.0.1:{port}:8080",
                 "--mount",
                 f"type=bind,src={secret_dir},dst=/run/secrets,readonly",
                 "--env",
@@ -2032,10 +2420,32 @@ class _ServiceTests(unittest.TestCase):
                 "--env",
                 "HA_TOKEN_FILE=/run/secrets/ha_token",
                 IMAGE,
-                check=False,
             )
-            self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
-            self.assertIn("configuration error", result.stderr)
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    try:
+                        status, _, _ = request_at(port, "/healthz", timeout=1)
+                        if status == 200:
+                            break
+                    except (OSError, urllib.error.URLError):
+                        pass
+                    time.sleep(0.2)
+                else:
+                    logs = docker("logs", name, check=False)
+                    self.fail(
+                        "app did not start with a symlinked regular token file:\n"
+                        + logs.stdout
+                        + logs.stderr
+                    )
+                logs = docker("logs", name, check=False)
+                self.assertIn(
+                    "Screenshot API ready: internal_port=8080",
+                    logs.stdout + logs.stderr,
+                )
+                self.assertNotIn("configuration error", logs.stdout + logs.stderr)
+            finally:
+                docker("rm", "--force", name, check=False)
 
     def test_oversized_configuration_values_fail_before_startup(self) -> None:
         invalid_values = (
@@ -2047,6 +2457,11 @@ class _ServiceTests(unittest.TestCase):
             ("PORT", "9" * 5000),
             ("RENDER_DEADLINE_SECONDS", "0"),
             ("DASHBOARD_REUSE_IDLE_SECONDS", "3601"),
+            ("MAX_AUTO_HEIGHT", "12001"),
+            ("FULL_PAGE_TILE_WAIT_MS", "5001"),
+            ("FRONTEND_OPTIONS_TIMEOUT_MS", "60001"),
+            ("ALLOWED_HOSTS", "not-an-ip"),
+            ("ALLOWED_HOSTS", "127.0.0.1,,::1"),
             ("FIXTURE_DELAY_MS", "30001"),
         )
         for key, value in invalid_values:

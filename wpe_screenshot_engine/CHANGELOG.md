@@ -2,6 +2,41 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-26
+
+### Added
+
+- Add an optional inbound client IP allowlist supporting IPv4, IPv6, and CIDR ranges.
+- Configure the maximum full-page screenshot height and the delay between capture tiles.
+- Configure the timeout for applying language, theme, and dark-mode overrides.
+- Add `/capabilities` to report supported formats, renderer state, settings, and the effective height limit for a requested width.
+
+### Changed
+
+- Listen on all available IPv4 and IPv6 interfaces by default.
+- Stream full-page PNG tiles into one bounded encoder to reduce peak memory use.
+- Capture full-page dashboards as stitched viewport tiles and allow time for lazy-loaded cards to paint.
+
+### Fixed
+
+- Return an explicit HTTP 413 error for full-page requests that exceed configured height or pixel limits instead of returning a clipped screenshot.
+- Apply defaults for the new settings when upgrading from existing Home Assistant App options.
+- Complete full-page captures when zoom rounding leaves a few unreachable rows by repeating the final captured row; reject larger non-scrollable gaps with HTTP 422.
+- Keep tile scroll requests at or before the requested output row to avoid skipped rows at fractional zoom.
+- Keep screenshot request and Soup object release on the main thread after background encoding.
+- Clear expired capture and readiness source IDs before their callbacks are removed.
+- Compare requested and reported language codes without case or separator differences.
+- Validate screenshot query options before returning the renderer-busy response.
+- Remove WebKit's token bootstrap script from the content manager after the first successful readiness check, and log that limited scope accurately.
+- Retry once after Home Assistant redirects to sign-in before capture begins, restoring the token bootstrap script.
+- Ignore delayed callbacks from replaced views; fail redirects after capture starts instead of reusing partial tile or encoder state.
+- Fail unsupported language overrides with HTTP 422 after a short apply window instead of waiting for the render deadline.
+- Accept Home Assistant's built-in `default` theme even when it is absent from the custom theme list.
+- Return HTTP 504 when Home Assistant theme data does not load before the frontend-options timeout; keep HTTP 422 for unavailable themes and overrides that are not applied.
+- Keep language and theme overrides out of Home Assistant profile storage even when frontend persistence runs asynchronously.
+- Clarify that cross-origin and opaque document-frame navigations are blocked by policy.
+- Allow Compose token paths that resolve to readable regular files, including symlink-based secret mounts.
+
 ## [0.2.2] - 2026-10-25
 
 ### Added
@@ -121,6 +156,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Configure the Home Assistant URL and token, dashboard route, readiness text, render deadline, page reuse interval, and WebKit memory target.
 - Provide `/healthz` and `/readyz` endpoints.
 
+[0.3.0]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.2...0.3.0
 [0.2.2]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.1...0.2.2
 [0.2.1]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/releases/tag/0.2.0

@@ -31,13 +31,19 @@
 #define DEFAULT_IMAGE_HEIGHT 800u
 #define MAX_FULL_DOCUMENT_SNAPSHOT_HEIGHT DEFAULT_IMAGE_HEIGHT
 #define MAX_VIEWPORT_DIMENSION 4096u
-#define MAX_AUTO_HEIGHT 4000u
+#define DEFAULT_MAX_AUTO_HEIGHT 12000u
+#define MIN_MAX_AUTO_HEIGHT 1000u
+#define MAX_MAX_AUTO_HEIGHT 12000u
+#define DEFAULT_FULL_PAGE_TILE_WAIT_MS 250u
+#define MAX_FULL_PAGE_TILE_WAIT_MS 5000u
 #define MAX_RENDER_DEADLINE_SECONDS 300u
 #define MAX_OUTPUT_IMAGE_BYTES (20u * 1024u * 1024u)
 #define MAX_RAW_IMAGE_BYTES (60u * 1024u * 1024u)
 #define MAX_HA_TOKEN_BYTES 8192u
 #define MAX_HA_URI_BYTES 8192u
 #define MAX_CONFIG_PATH_BYTES 4096u
+#define MAX_ALLOWED_HOSTS_BYTES 4096u
+#define MAX_ALLOWED_HOSTS_ENTRIES 64u
 #define MAX_EXPECTED_TEXT_BYTES 256u
 #define MAX_FIXTURE_HTML_BYTES (1024u * 1024u)
 #define MAX_DASHBOARD_PATH_BYTES 256u
@@ -54,6 +60,9 @@
 #define MAX_WAIT_MS 30000
 #define MAX_THEME_BYTES 1024u
 #define MAX_LANGUAGE_BYTES 64u
+#define DEFAULT_FRONTEND_OPTIONS_TIMEOUT_MS 10000u
+#define MIN_FRONTEND_OPTIONS_TIMEOUT_MS 1000u
+#define MAX_FRONTEND_OPTIONS_TIMEOUT_MS 60000u
 
 typedef enum {
     OUTPUT_FORMAT_PNG,
@@ -64,6 +73,7 @@ typedef enum {
 
 typedef struct _App App;
 typedef struct _RenderRequest RenderRequest;
+typedef struct _PngStreamEncoder PngStreamEncoder;
 
 struct _RenderRequest {
     gint refs;
@@ -80,13 +90,16 @@ struct _RenderRequest {
     gulong message_disconnected_handler;
     gulong message_finished_handler;
     guint readiness_error_count;
+    guint auth_retry_count;
+    gboolean auth_retry_scheduled;
     gboolean readiness_pending;
     gboolean reused_page;
     gboolean frontend_options_applied;
     gboolean frontend_options_verified;
     gboolean frontend_options_pending;
+    gint64 frontend_options_started_at_us;
     gboolean capture_scheduled;
-    gboolean auto_height_truncated;
+    gboolean capture_started;
     gboolean auto_height;
     gboolean tiled_auto_height;
     gboolean dark_mode;
@@ -98,10 +111,11 @@ struct _RenderRequest {
     guint capture_height;
     guint capture_offset_y;
     guint tile_scroll_y;
+    gboolean pad_final_png_rows;
     guint8 *capture_pixels;
-    gsize capture_pixels_length;
     gdouble zoom;
     OutputFormat format;
+    PngStreamEncoder *png_stream;
     gint64 started_at_us;
     gchar *path;
     gchar *encoded_path;
@@ -117,6 +131,8 @@ struct _App {
     WebKitNetworkSession *network_session;
     WPEDisplay *display;
     WebKitWebView *view;
+    WebKitUserContentManager *auth_content_manager;
+    WebKitUserScript *auth_script;
     WPEView *wpe_view;
     RenderRequest *active;
     guint64 next_request_id;
@@ -127,6 +143,10 @@ struct _App {
     guint render_deadline_ms;
     guint dashboard_reuse_idle_seconds;
     guint webkit_process_memory_limit_mb;
+    guint max_auto_height;
+    guint full_page_tile_wait_ms;
+    guint frontend_options_timeout_ms;
+    GPtrArray *allowed_host_masks;
     gboolean renderer_ready;
     gboolean renderer_idle_released;
     gboolean renderer_recovery_warning_logged;
@@ -135,6 +155,7 @@ struct _App {
     gchar *dashboard_requested_path;
     gboolean fixture_mode;
     gboolean fixture_ha_readiness;
+    gboolean fixture_auth_bootstrap;
     guint fixture_load_count;
     guint fixture_readiness_error_count;
     guint fixture_view_recreate_failure_count;
@@ -170,6 +191,7 @@ static void app_recreate_view(App *app);
 static void app_schedule_recreate_view(App *app);
 static void app_schedule_idle_release(App *app);
 static gboolean app_ensure_view(App *app);
+static gboolean app_clear_auth_bootstrap(App *app);
 static gboolean current_request(RenderRequest *request);
 static gboolean same_origin(App *app, const gchar *candidate);
 static gboolean is_same_origin_uri(App *app, const gchar *uri_text);
@@ -187,17 +209,25 @@ static void on_snapshot_ready(GObject *source, GAsyncResult *result, gpointer us
 static void on_document_height_ready(GObject *source, GAsyncResult *result,
                                      gpointer user_data);
 static void start_tiled_scroll(RenderRequest *request);
+static void restore_tiled_scroll(RenderRequest *request);
 static void on_tiled_scroll_ready(GObject *source, GAsyncResult *result,
                                   gpointer user_data);
 static void on_tiled_scroll_restored(GObject *source, GAsyncResult *result,
                                      gpointer user_data);
-static GBytes *encode_snapshot(RenderRequest *request, const guint8 *pixels,
+static GBytes *encode_snapshot(OutputFormat format, const guint8 *pixels,
                                guint stride, guint width, guint height,
                                gboolean *too_large);
 static void encode_snapshot_async(RenderRequest *request, const guint8 *pixels,
                                   guint stride, guint width, guint height,
                                   GBytes *source_bytes, guint8 *owned_pixels,
                                   gboolean reset_view);
+static void png_stream_encoder_free(PngStreamEncoder *encoder);
+static PngStreamEncoder *png_stream_encoder_new(guint width, guint height,
+                                               guint pad_tolerance_rows);
+static void encode_png_tile_async(RenderRequest *request, GBytes *source_bytes,
+                                  guint stride, guint source_y, guint rows);
+static void finish_png_stream_async(RenderRequest *request,
+                                    gboolean pad_remaining_rows);
 static void on_frontend_options_ready(GObject *source, GAsyncResult *result,
                                       gpointer user_data);
 static void start_readiness_checks(RenderRequest *request);
@@ -260,6 +290,105 @@ parse_config_uint(const gchar *name, const gchar *value, guint minimum,
 
     g_printerr("configuration error: %s must be an integer from %u through %u\n",
                name, minimum, maximum);
+    return FALSE;
+}
+
+static void
+inet_address_mask_unref(gpointer data)
+{
+    g_object_unref(data);
+}
+
+static gboolean
+parse_allowed_hosts(App *app, const gchar *value)
+{
+    app->allowed_host_masks = g_ptr_array_new_with_free_func(
+        inet_address_mask_unref);
+    if (!value || !*value)
+        return TRUE;
+
+    gsize length = strnlen(value, MAX_ALLOWED_HOSTS_BYTES + 1u);
+    if (length > MAX_ALLOWED_HOSTS_BYTES) {
+        g_printerr("configuration error: ALLOWED_HOSTS exceeds 4096 bytes\n");
+        return FALSE;
+    }
+    gchar *copy = g_strndup(value, length);
+    gchar **entries = g_strsplit(copy, ",", -1);
+    gboolean valid = TRUE;
+    for (guint index = 0; entries[index]; ++index) {
+        gchar *entry = g_strstrip(entries[index]);
+        if (!*entry || app->allowed_host_masks->len >=
+                       MAX_ALLOWED_HOSTS_ENTRIES) {
+            valid = FALSE;
+            break;
+        }
+
+        GError *error = NULL;
+        GInetAddressMask *mask = g_inet_address_mask_new_from_string(
+            entry, &error);
+        g_clear_error(&error);
+        if (!mask) {
+            valid = FALSE;
+            break;
+        }
+        g_ptr_array_add(app->allowed_host_masks, mask);
+    }
+    g_strfreev(entries);
+    g_free(copy);
+    if (!valid) {
+        g_printerr("configuration error: ALLOWED_HOSTS must be a comma-separated list of IP addresses or CIDR ranges (maximum 64 entries)\n");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean
+ip_address_matches_mask(GInetAddress *address, GInetAddressMask *mask)
+{
+    if (g_inet_address_mask_matches(mask, address))
+        return TRUE;
+
+    /* Some dual-stack sockets report IPv4 peers as IPv4-mapped IPv6. */
+    static const guint8 ipv4_mapped_prefix[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff
+    };
+    if (g_inet_address_get_family(address) != G_SOCKET_FAMILY_IPV6)
+        return FALSE;
+    const guint8 *bytes = g_inet_address_to_bytes(address);
+    if (memcmp(bytes, ipv4_mapped_prefix, sizeof(ipv4_mapped_prefix)))
+        return FALSE;
+
+    GInetAddress *ipv4_address = g_inet_address_new_from_bytes(
+        bytes + sizeof(ipv4_mapped_prefix), G_SOCKET_FAMILY_IPV4);
+    gboolean matches = g_inet_address_mask_matches(mask, ipv4_address);
+    g_object_unref(ipv4_address);
+    return matches;
+}
+
+static gboolean
+client_address_is_allowed(App *app, SoupServerMessage *message,
+                          gchar **remote_address_out)
+{
+    if (remote_address_out)
+        *remote_address_out = NULL;
+    if (!app->allowed_host_masks || !app->allowed_host_masks->len)
+        return TRUE;
+
+    GSocketAddress *socket_address =
+        soup_server_message_get_remote_address(message);
+    if (!socket_address || !G_IS_INET_SOCKET_ADDRESS(socket_address))
+        return FALSE;
+
+    GInetAddress *address = g_inet_socket_address_get_address(
+        G_INET_SOCKET_ADDRESS(socket_address));
+    if (remote_address_out)
+        *remote_address_out = g_inet_address_to_string(address);
+    for (guint index = 0; index < app->allowed_host_masks->len; ++index) {
+        GInetAddressMask *mask = g_ptr_array_index(
+            app->allowed_host_masks, index);
+        if (ip_address_matches_mask(address, mask))
+            return TRUE;
+    }
     return FALSE;
 }
 
@@ -352,7 +481,7 @@ read_token_file_bounded(const gchar *path)
     if (!path || strnlen(path, MAX_CONFIG_PATH_BYTES + 1u) > MAX_CONFIG_PATH_BYTES)
         return NULL;
 
-    gint fd = g_open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0);
+    gint fd = g_open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK, 0);
     if (fd < 0)
         return NULL;
 
@@ -443,12 +572,18 @@ load_runtime_config(App *app)
     const gchar *deadline_text = g_getenv("RENDER_DEADLINE_SECONDS");
     const gchar *reuse_idle_text = g_getenv("DASHBOARD_REUSE_IDLE_SECONDS");
     const gchar *webkit_memory_limit_text = g_getenv("WEBKIT_PROCESS_MEMORY_LIMIT_MB");
+    const gchar *max_auto_height_text = g_getenv("MAX_AUTO_HEIGHT");
+    const gchar *full_page_tile_wait_text = g_getenv("FULL_PAGE_TILE_WAIT_MS");
+    const gchar *frontend_options_timeout_text =
+        g_getenv("FRONTEND_OPTIONS_TIMEOUT_MS");
+    const gchar *allowed_hosts_text = g_getenv("ALLOWED_HOSTS");
     guint deadline_seconds = DEFAULT_RENDER_DEADLINE_MS / 1000u;
 
     app->fixture_mode = env_truthy("WPE_FIXTURE_MODE");
     if (app->fixture_mode) {
         fixture_path = g_getenv("FIXTURE_HTML_PATH");
         app->fixture_ha_readiness = env_truthy("FIXTURE_HA_READINESS");
+        app->fixture_auth_bootstrap = env_truthy("WPE_FIXTURE_AUTH_BOOTSTRAP");
     }
     const gchar *configured_token_file = token_file && *token_file ?
         token_file : "/run/secrets/ha_token";
@@ -546,6 +681,25 @@ load_runtime_config(App *app)
         g_printerr("configuration error: WEBKIT_PROCESS_MEMORY_LIMIT_MB must be between 512 and 3072 MiB\n");
         return FALSE;
     }
+    app->max_auto_height = DEFAULT_MAX_AUTO_HEIGHT;
+    if (!parse_config_uint("MAX_AUTO_HEIGHT", max_auto_height_text,
+                           MIN_MAX_AUTO_HEIGHT, MAX_MAX_AUTO_HEIGHT,
+                           &app->max_auto_height))
+        return FALSE;
+    app->full_page_tile_wait_ms = DEFAULT_FULL_PAGE_TILE_WAIT_MS;
+    if (!parse_config_uint("FULL_PAGE_TILE_WAIT_MS", full_page_tile_wait_text,
+                           0, MAX_FULL_PAGE_TILE_WAIT_MS,
+                           &app->full_page_tile_wait_ms))
+        return FALSE;
+    app->frontend_options_timeout_ms = DEFAULT_FRONTEND_OPTIONS_TIMEOUT_MS;
+    if (!parse_config_uint("FRONTEND_OPTIONS_TIMEOUT_MS",
+                           frontend_options_timeout_text,
+                           MIN_FRONTEND_OPTIONS_TIMEOUT_MS,
+                           MAX_FRONTEND_OPTIONS_TIMEOUT_MS,
+                           &app->frontend_options_timeout_ms))
+        return FALSE;
+    if (!parse_allowed_hosts(app, allowed_hosts_text))
+        return FALSE;
 
     if (app->fixture_mode) {
         app->fixture_delay_ms = 350;
@@ -592,6 +746,7 @@ request_unref(RenderRequest *request)
     g_free(request->language);
     g_free(request->last_readiness_state);
     g_free(request->capture_pixels);
+    png_stream_encoder_free(request->png_stream);
     g_free(request);
 }
 
@@ -619,6 +774,13 @@ current_request(RenderRequest *request)
     return request && !request->finished && request->app->active == request &&
            request->id == request->app->next_request_id &&
            request->view_generation == request->app->view_generation;
+}
+
+static gboolean
+current_view_request(RenderRequest *request, GObject *source)
+{
+    return current_request(request) && !request->auth_retry_scheduled &&
+           WEBKIT_WEB_VIEW(source) == request->app->view;
 }
 
 static void
@@ -653,6 +815,18 @@ respond_text(SoupServerMessage *message, guint status, const gchar *text)
     soup_server_message_set_response(message, "text/plain; charset=utf-8",
                                      SOUP_MEMORY_COPY, body, length);
     set_response_headers(message, "text/plain; charset=utf-8", "no-store", length);
+}
+
+static void
+respond_json(SoupServerMessage *message, guint status, const gchar *json)
+{
+    const gchar *body = json ? json : "{}\n";
+    gsize length = strlen(body);
+    soup_server_message_set_status(message, status, NULL);
+    soup_server_message_set_response(message, "application/json; charset=utf-8",
+                                     SOUP_MEMORY_COPY, body, length);
+    set_response_headers(message, "application/json; charset=utf-8",
+                         "no-store", length);
 }
 
 static void
@@ -730,10 +904,6 @@ request_finish(RenderRequest *request, guint status, const gchar *text,
         soup_server_message_set_response(request->message, mime_type, SOUP_MEMORY_TAKE,
                                          bytes, length);
         set_response_headers(request->message, mime_type, "no-store", length);
-        if (request->auto_height_truncated)
-            soup_message_headers_replace(
-                soup_server_message_get_response_headers(request->message),
-                "X-WPE-Screenshot-Truncated", "true");
     } else {
         gint64 elapsed_us = g_get_monotonic_time() - request->started_at_us;
         guint64 elapsed_ms = elapsed_us > 0 ? (guint64) elapsed_us / 1000u : 0;
@@ -928,7 +1098,9 @@ on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
         WebKitURIRequest *request = action ?
             webkit_navigation_action_get_request(action) : NULL;
         const gchar *uri = request ? webkit_uri_request_get_uri(request) : NULL;
-        /* Cross-origin iframe navigation is intentionally outside the render policy. */
+        /* Keep every document navigation on the configured HA origin. Blocking
+         * cross-origin frames prevents a dashboard from embedding unrelated
+         * content in the captured image. */
         if (uri && !is_same_origin_uri(app, uri)) {
             webkit_policy_decision_ignore(decision);
             app->dashboard_loaded = FALSE;
@@ -944,18 +1116,33 @@ on_decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
     return FALSE;
 }
 
+static gboolean
+app_clear_auth_bootstrap(App *app)
+{
+    gboolean removed = FALSE;
+    if (app->auth_content_manager && app->auth_script) {
+        webkit_user_content_manager_remove_script(app->auth_content_manager,
+                                                 app->auth_script);
+        webkit_user_script_unref(app->auth_script);
+        app->auth_script = NULL;
+        removed = TRUE;
+    }
+    g_clear_object(&app->auth_content_manager);
+    return removed;
+}
+
 static WebKitWebView *
 create_view(App *app)
 {
     app->view_generation++;
     WebKitUserContentManager *manager = webkit_user_content_manager_new();
-    if (!app->fixture_mode) {
+    if (!app->fixture_mode || app->fixture_auth_bootstrap) {
         gchar *source = auth_bootstrap_script(app);
-        WebKitUserScript *script = webkit_user_script_new(
+        app->auth_script = webkit_user_script_new(
             source, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
             WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
-        webkit_user_content_manager_add_script(manager, script);
-        webkit_user_script_unref(script);
+        webkit_user_content_manager_add_script(manager, app->auth_script);
+        app->auth_content_manager = g_object_ref(manager);
         secure_free_string(source);
     }
 
@@ -1004,6 +1191,7 @@ app_recreate_view(App *app)
     app->dashboard_loaded = FALSE;
     app->dashboard_last_capture_at_us = 0;
     g_clear_pointer(&app->dashboard_requested_path, g_free);
+    app_clear_auth_bootstrap(app);
     app->wpe_view = NULL;
     if (app->view) {
         g_signal_handlers_disconnect_by_data(app->view, app);
@@ -1165,11 +1353,98 @@ fixture_load(App *app, RenderRequest *request)
     g_string_append_len(replaced, cursor, (gssize) (end - cursor));
     g_free(html);
     g_free(delay_text);
-    gchar *base_uri = g_strdup_printf("%s/%s", app->ha_url,
-                                      request->encoded_path);
+    const gchar *base_path = request->encoded_path;
+    if (!request->auth_retry_count &&
+        (!g_strcmp0(request->path, "lovelace/auth-retry") ||
+         !g_strcmp0(request->path, "lovelace/auth-fails-first")))
+        base_path = "auth/authorize?client_id=fixture";
+    gchar *base_uri = g_strdup_printf("%s/%s", app->ha_url, base_path);
     webkit_web_view_load_html(app->view, replaced->str, base_uri);
     g_free(base_uri);
     g_string_free(replaced, TRUE);
+    return TRUE;
+}
+
+static gboolean
+retry_auth_request_idle(gpointer user_data)
+{
+    RenderRequest *request = user_data;
+    if (!current_request(request))
+        return G_SOURCE_REMOVE;
+
+    App *app = request->app;
+    g_cancellable_cancel(request->cancellable);
+    g_clear_object(&request->cancellable);
+    request->cancellable = g_cancellable_new();
+    app_recreate_view(app);
+    if (!app->renderer_ready)
+        app_ensure_view(app);
+    if (!app->view || !app->wpe_view || !app->renderer_ready) {
+        request_finish(request, 503,
+                       "WPE renderer could not be recreated for authentication recovery.\n",
+                       NULL, TRUE);
+        return G_SOURCE_REMOVE;
+    }
+
+    request->view_generation = app->view_generation;
+    request->reused_page = FALSE;
+    request->frontend_options_applied = FALSE;
+    request->frontend_options_verified = FALSE;
+    request->frontend_options_pending = FALSE;
+    request->frontend_options_started_at_us = 0;
+    request->readiness_pending = FALSE;
+    request->readiness_error_count = 0;
+    request->capture_scheduled = FALSE;
+    request->capture_started = FALSE;
+    request->tiled_auto_height = FALSE;
+    request->capture_height = 0;
+    request->capture_offset_y = 0;
+    request->tile_scroll_y = 0;
+    request->pad_final_png_rows = FALSE;
+    g_clear_pointer(&request->last_readiness_state, g_free);
+    request->auth_retry_scheduled = FALSE;
+
+    guint initial_height = request->auto_height ? DEFAULT_IMAGE_HEIGHT :
+                                                  request->height;
+    wpe_view_resized(app->wpe_view, request->width, initial_height);
+    webkit_web_view_set_zoom_level(app->view, request->zoom);
+    if (app->fixture_mode) {
+        fixture_load(app, request);
+    } else {
+        gchar *uri = g_strdup_printf("%s/%s", app->ha_url,
+                                     request->encoded_path);
+        webkit_web_view_load_uri(app->view, uri);
+        g_free(uri);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+schedule_auth_retry(RenderRequest *request)
+{
+    if (!current_request(request))
+        return FALSE;
+    if (request->auth_retry_scheduled)
+        return TRUE;
+    /* A capture may own tile buffers or an encoder task; don't replay those
+     * resources against a replacement view. */
+    if (request->auth_retry_count || request->app->auth_script ||
+        request->capture_started || request->tiled_auto_height ||
+        request->png_stream || request->capture_pixels ||
+        request->capture_offset_y || request->tile_source)
+        return FALSE;
+
+    request->auth_retry_count++;
+    request->auth_retry_scheduled = TRUE;
+    g_message("Home Assistant redirected to authentication; retrying request once with a fresh token bootstrap: request_id=%llu route=/%s",
+              (unsigned long long) request->id, request->path);
+    remove_source(&request->readiness_source);
+    remove_source(&request->wait_source);
+    remove_source(&request->tile_source);
+    request->readiness_pending = FALSE;
+    request->frontend_options_pending = FALSE;
+    g_idle_add_full(G_PRIORITY_HIGH, retry_auth_request_idle,
+                    request_ref(request), (GDestroyNotify) request_unref);
     return TRUE;
 }
 
@@ -1182,6 +1457,11 @@ ready_script(App *app, RenderRequest *request, gchar **script_out)
         !g_strcmp0(request->path, app->readiness_path) ?
         "if(!document.querySelector('[data-fixture-ready=true]'))return 'wait-fixture';" :
         "";
+    const gchar *theme_data_ready = request->theme &&
+        !request->frontend_options_applied ?
+        "const initialHa=document.querySelector('home-assistant');"
+        "if(initialHa&&initialHa.hass&&(!initialHa.hass.themes||"
+        "!initialHa.hass.themes.themes))return 'wait-themes';" : "";
     const gchar *home_assistant_readiness =
         app->fixture_mode && !app->fixture_ha_readiness ? "" :
         "if(location.pathname.indexOf('/auth/authorize')===0)return 'auth';"
@@ -1209,7 +1489,9 @@ ready_script(App *app, RenderRequest *request, gchar **script_out)
         if (request->language) {
             gchar *language = js_quote(request->language);
             g_string_append_printf(options_ready,
-                "if(optionHa.hass.language!==%s||document.documentElement.lang!==%s)"
+                "const normalizeLanguage=value=>String(value||'').replace(/_/g,'-').toLowerCase();"
+                "if(normalizeLanguage(optionHa.hass.language)!==normalizeLanguage(%s)||"
+                "normalizeLanguage(document.documentElement.lang)!==normalizeLanguage(%s))"
                 "return 'wait-language';", language, language);
             g_free(language);
         }
@@ -1232,9 +1514,10 @@ ready_script(App *app, RenderRequest *request, gchar **script_out)
     }
     if (!expected_text[0]) {
         *script_out = g_strdup_printf(
-            "(()=>{%s%s%s%sif(document.fonts&&document.fonts.status!=='loaded')return 'wait-fonts';"
+            "(()=>{%s%s%s%s%sif(document.fonts&&document.fonts.status!=='loaded')return 'wait-fonts';"
             "return 'ready';})()",
-            layout_ready, fixture, home_assistant_readiness, options_ready->str);
+            layout_ready, fixture, home_assistant_readiness, theme_data_ready,
+            options_ready->str);
         g_string_free(options_ready, TRUE);
         g_free(layout_ready);
         return TRUE;
@@ -1242,13 +1525,13 @@ ready_script(App *app, RenderRequest *request, gchar **script_out)
 
     gchar *expected = js_quote(expected_text);
     *script_out = g_strdup_printf(
-        "(()=>{%s%s%s%sif(document.fonts&&document.fonts.status!=='loaded')return 'wait-fonts';"
+        "(()=>{%s%s%s%s%sif(document.fonts&&document.fonts.status!=='loaded')return 'wait-fonts';"
         "let text='';const walk=root=>{if(!root)return;text+=' '+(root.textContent||'');"
         "for(const e of root.querySelectorAll('*'))if(e.shadowRoot)walk(e.shadowRoot);};"
         "walk(document.body);return text.toLocaleLowerCase().includes(%s.toLocaleLowerCase())?"
         "'ready':'wait';})()",
-        layout_ready, fixture, home_assistant_readiness, options_ready->str,
-        expected);
+        layout_ready, fixture, home_assistant_readiness, theme_data_ready,
+        options_ready->str, expected);
     g_string_free(options_ready, TRUE);
     g_free(layout_ready);
     secure_free_string(expected);
@@ -1271,9 +1554,10 @@ static gboolean
 capture_timer(gpointer user_data)
 {
     RenderRequest *request = user_data;
+    request->wait_source = 0;
     if (!current_request(request))
         return G_SOURCE_REMOVE;
-    request->wait_source = 0;
+    request->capture_started = TRUE;
     if (request->auto_height) {
         g_message("Full-page capture starting: request_id=%llu route=/%s",
                   (unsigned long long) request->id, request->path);
@@ -1292,8 +1576,9 @@ capture_timer(gpointer user_data)
             "/auto|scroll/.test(getComputedStyle(element).overflowY))innerScroll=true;"
             "if(element.shadowRoot)inspect(element.shadowRoot);}};inspect(document);"
             "if(innerScroll)return 'inner-scroll';"
-            "return Math.min(4001,Math.ceil(Math.max(document.documentElement.scrollHeight,"
-            "document.body ? document.body.scrollHeight : 0)*%s));})()", zoom_text);
+            "return Math.min(%u,Math.ceil(Math.max(document.documentElement.scrollHeight,"
+            "document.body ? document.body.scrollHeight : 0)*%s));})()",
+            request->app->max_auto_height + 1u, zoom_text);
         webkit_web_view_evaluate_javascript(
             request->app->view, script, -1, NULL, NULL, request->cancellable,
             on_document_height_ready, request_ref(request));
@@ -1321,6 +1606,13 @@ frontend_options_script(RenderRequest *request)
     GString *script = g_string_new(
         "(()=>{const ha=document.querySelector('home-assistant');"
         "if(!ha||!ha.hass)throw new Error('Home Assistant frontend is not ready');");
+    if (theme) {
+        g_string_append_printf(script,
+            "const themes=ha.hass.themes&&ha.hass.themes.themes;"
+            "if(!themes||(!Object.prototype.hasOwnProperty.call(themes,%s)&&"
+            "%s!=='default'))"
+            "return 'invalid-theme';", theme, theme);
+    }
     if (language || theme || request->has_dark_mode) {
         g_string_append(script,
             "const conn=ha.hass&&ha.hass.connection;"
@@ -1328,18 +1620,59 @@ frontend_options_script(RenderRequest *request)
             "throw new Error('Cannot safely apply temporary frontend options');"
             "const send=conn.sendMessagePromise;"
             "const descriptor=Object.getOwnPropertyDescriptor(conn,'sendMessagePromise');"
-            "const saveStorage=storage=>{const values={};for(let i=0;i<storage.length;i++){"
-            "const key=storage.key(i);values[key]=storage.getItem(key);}return values;};"
-            "const restoreStorage=(storage,values)=>{storage.clear();"
-            "for(const key of Object.keys(values))storage.setItem(key,values[key]);};"
-            "const localState=saveStorage(window.localStorage);"
-            "const sessionState=saveStorage(window.sessionStorage);"
-            "try{conn.sendMessagePromise=function(message){"
+            "const storage=Storage.prototype;"
+            "const setDescriptor=Object.getOwnPropertyDescriptor(storage,'setItem');"
+            "const removeDescriptor=Object.getOwnPropertyDescriptor(storage,'removeItem');"
+            "const clearDescriptor=Object.getOwnPropertyDescriptor(storage,'clear');"
+            "if(!setDescriptor||!removeDescriptor||!clearDescriptor)"
+            "throw new Error('Cannot safely guard temporary frontend storage');"
+            "const originalSet=setDescriptor.value;"
+            "const originalRemove=removeDescriptor.value;"
+            "const originalClear=clearDescriptor.value;"
+            "const protectedKeys=new Set(['selectedTheme','selectedLanguage']);"
+            "const blockedSend=function(message){"
             "if(message&&message.type==='frontend/set_user_data'&&"
             "(message.key==='theme'||message.key==='language'))"
             "return Promise.resolve();return send.apply(this,arguments);};"
-            "if(conn.sendMessagePromise===send)"
-            "throw new Error('Cannot safely apply temporary frontend options');");
+            "const blockedSet=function(key,value){"
+            "if((this===window.localStorage||this===window.sessionStorage)&&"
+            "protectedKeys.has(String(key)))return;"
+            "return originalSet.apply(this,arguments);};"
+            "const blockedRemove=function(key){"
+            "if((this===window.localStorage||this===window.sessionStorage)&&"
+            "protectedKeys.has(String(key)))return;"
+            "return originalRemove.apply(this,arguments);};"
+            "const localState={selectedTheme:localStorage.getItem('selectedTheme'),"
+            "selectedLanguage:localStorage.getItem('selectedLanguage')};"
+            "const sessionState={selectedTheme:sessionStorage.getItem('selectedTheme'),"
+            "selectedLanguage:sessionStorage.getItem('selectedLanguage')};"
+            "const restoreState=(target,state)=>{for(const key of protectedKeys){"
+            "const value=state[key];if(value===null)originalRemove.call(target,key);"
+            "else originalSet.call(target,key,value);}};"
+            "const blockedClear=function(){"
+            "if(this===window.localStorage||this===window.sessionStorage){"
+            "const state=this===window.localStorage?localState:sessionState;"
+            "originalClear.apply(this,arguments);restoreState(this,state);return;}"
+            "return originalClear.apply(this,arguments);};"
+            "const guardedDescriptor=descriptor&&Object.prototype.hasOwnProperty.call(descriptor,'value')?"
+            "{...descriptor,value:blockedSend}:{value:blockedSend,writable:true,"
+            "configurable:!descriptor||descriptor.configurable,"
+            "enumerable:descriptor?descriptor.enumerable:true};"
+            "const restore=()=>{if(conn.sendMessagePromise===blockedSend){"
+            "if(descriptor)Object.defineProperty(conn,'sendMessagePromise',descriptor);"
+            "else delete conn.sendMessagePromise;}"
+            "if(storage.setItem===blockedSet)Object.defineProperty(storage,'setItem',setDescriptor);"
+            "if(storage.removeItem===blockedRemove)Object.defineProperty(storage,'removeItem',removeDescriptor);"
+            "if(storage.clear===blockedClear)Object.defineProperty(storage,'clear',clearDescriptor);};"
+            "try{Object.defineProperty(conn,'sendMessagePromise',guardedDescriptor);"
+            "Object.defineProperty(storage,'setItem',{...setDescriptor,value:blockedSet});"
+            "Object.defineProperty(storage,'removeItem',{...removeDescriptor,value:blockedRemove});"
+            "Object.defineProperty(storage,'clear',{...clearDescriptor,value:blockedClear});"
+            "if(conn.sendMessagePromise!==blockedSend||storage.setItem!==blockedSet||"
+            "storage.removeItem!==blockedRemove||storage.clear!==blockedClear)"
+            "throw new Error('Temporary frontend guards were not installed');"
+            "window.addEventListener('pagehide',restore,{once:true});"
+            "}catch(error){restore();throw new Error('Cannot safely guard temporary frontend options');}");
         if (language)
             g_string_append_printf(script,
                 "ha.dispatchEvent(new CustomEvent('hass-language-select',{detail:%s}));",
@@ -1354,11 +1687,6 @@ frontend_options_script(RenderRequest *request)
             g_string_append(script,
                 "ha.dispatchEvent(new CustomEvent('settheme',{detail}));");
         }
-        g_string_append(script,
-            "}finally{try{if(descriptor)Object.defineProperty(conn,'sendMessagePromise',descriptor);"
-            "else delete conn.sendMessagePromise;}finally{try{restoreStorage(window.localStorage,localState);"
-            "restoreStorage(window.sessionStorage,sessionState);}catch(error){"
-            "throw new Error('Could not restore temporary frontend storage');}}}");
     }
     g_string_append(script, "return 'applied';})()");
     g_free(language);
@@ -1374,7 +1702,7 @@ on_frontend_options_ready(GObject *source, GAsyncResult *result,
     GError *error = NULL;
     JSCValue *value = webkit_web_view_evaluate_javascript_finish(
         WEBKIT_WEB_VIEW(source), result, &error);
-    if (!current_request(request)) {
+    if (!current_view_request(request, source)) {
         g_clear_object(&value);
         g_clear_error(&error);
         request_unref(request);
@@ -1387,9 +1715,21 @@ on_frontend_options_ready(GObject *source, GAsyncResult *result,
                        "Home Assistant screenshot options could not be applied.\n",
                        NULL, TRUE);
     } else {
+        gchar *script_result = jsc_value_to_string(value);
         g_object_unref(value);
         request->frontend_options_pending = FALSE;
-        start_readiness_checks(request);
+        if (!g_strcmp0(script_result, "invalid-theme")) {
+            request_finish(request, 422,
+                           "The requested Home Assistant theme is not available.\n",
+                           NULL, TRUE);
+        } else if (g_strcmp0(script_result, "applied")) {
+            request_finish(request, 502,
+                           "Home Assistant screenshot options could not be applied.\n",
+                           NULL, TRUE);
+        } else {
+            start_readiness_checks(request);
+        }
+        g_free(script_result);
     }
     request_unref(request);
 }
@@ -1400,13 +1740,13 @@ on_readiness_result(GObject *source, GAsyncResult *result, gpointer user_data)
     RenderRequest *request = user_data;
     GError *error = NULL;
     JSCValue *value = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(source), result, &error);
-    request->readiness_pending = FALSE;
-    if (!current_request(request)) {
+    if (!current_view_request(request, source)) {
         g_clear_object(&value);
         g_clear_error(&error);
         request_unref(request);
         return;
     }
+    request->readiness_pending = FALSE;
     if (error || !value) {
         if (request->readiness_error_count++ == 0)
             g_warning("Dashboard readiness evaluation failed temporarily; retrying until the render deadline");
@@ -1427,12 +1767,37 @@ on_readiness_result(GObject *source, GAsyncResult *result, gpointer user_data)
     }
     if (state && !strcmp(state, "auth")) {
         g_free(state);
-        request_finish(request, 502, "Home Assistant authentication failed.\n", NULL, TRUE);
+        if (!schedule_auth_retry(request))
+            request_finish(request, 502,
+                           "Home Assistant authentication failed. Verify the token and its user's permissions.\n",
+                           NULL, TRUE);
+        request_unref(request);
+        return;
+    }
+    gboolean language_pending = state && !strcmp(state, "wait-language");
+    gboolean theme_pending = state && !strcmp(state, "wait-theme");
+    gboolean themes_pending = state && !strcmp(state, "wait-themes");
+    if (themes_pending && !request->frontend_options_started_at_us)
+        request->frontend_options_started_at_us = g_get_monotonic_time();
+    gboolean options_pending = language_pending || theme_pending || themes_pending;
+    if (options_pending && request->frontend_options_started_at_us &&
+        g_get_monotonic_time() - request->frontend_options_started_at_us >
+            (gint64) request->app->frontend_options_timeout_ms * 1000) {
+        g_free(state);
+        request_finish(request, themes_pending ? 504 : 422,
+                       language_pending ?
+                           "Home Assistant did not apply the requested language before FRONTEND_OPTIONS_TIMEOUT_MS. Check that it is supported.\n" :
+                       themes_pending ?
+                           "Home Assistant theme data did not load before FRONTEND_OPTIONS_TIMEOUT_MS.\n" :
+                           "Home Assistant did not apply the requested theme or dark mode before FRONTEND_OPTIONS_TIMEOUT_MS. Check that the theme supports the requested setting.\n",
+                       NULL, TRUE);
         request_unref(request);
         return;
     }
     gboolean ready = state && !strcmp(state, "ready");
     g_free(state);
+    if (ready && app_clear_auth_bootstrap(request->app))
+        g_message("Home Assistant token bootstrap script removed from WebKit after renderer readiness");
     if (ready && !request->frontend_options_applied) {
         remove_source(&request->readiness_source);
         if (request->language || request->theme || request->has_dark_mode) {
@@ -1442,6 +1807,7 @@ on_readiness_result(GObject *source, GAsyncResult *result, gpointer user_data)
             request->app->dashboard_last_capture_at_us = 0;
             request->frontend_options_applied = TRUE;
             request->frontend_options_pending = TRUE;
+            request->frontend_options_started_at_us = g_get_monotonic_time();
             gchar *script = frontend_options_script(request);
             webkit_web_view_evaluate_javascript(
                 request->app->view, script, -1, NULL, NULL,
@@ -1465,8 +1831,10 @@ static gboolean
 readiness_tick(gpointer user_data)
 {
     RenderRequest *request = user_data;
-    if (!current_request(request))
+    if (!current_request(request)) {
+        request->readiness_source = 0;
         return G_SOURCE_REMOVE;
+    }
     if (request->readiness_pending)
         return G_SOURCE_CONTINUE;
 
@@ -1506,7 +1874,7 @@ on_document_height_ready(GObject *source, GAsyncResult *result,
     GError *error = NULL;
     JSCValue *value = webkit_web_view_evaluate_javascript_finish(
         WEBKIT_WEB_VIEW(source), result, &error);
-    if (!current_request(request)) {
+    if (!current_view_request(request, source)) {
         g_clear_object(&value);
         g_clear_error(&error);
         request_unref(request);
@@ -1539,9 +1907,20 @@ on_document_height_ready(GObject *source, GAsyncResult *result,
         return;
     }
 
-    request->auto_height_truncated = document_height > MAX_AUTO_HEIGHT;
-    request->capture_height = MIN(document_height ? document_height : 1u,
-                                  MAX_AUTO_HEIGHT);
+    if (document_height > request->app->max_auto_height) {
+        g_message("Full-page capture rejected at height limit: request_id=%llu configured_limit=%u",
+                  (unsigned long long) request->id,
+                  request->app->max_auto_height);
+        gchar *message = g_strdup_printf(
+            "Full-page screenshot exceeds the configured %u px height limit; no clipped image was returned.\n",
+            request->app->max_auto_height);
+        request_finish(request, 413, message, NULL, TRUE);
+        g_free(message);
+        request_unref(request);
+        return;
+    }
+    request->capture_height = MAX(document_height, 1u);
+    guint rounding_tolerance = (guint) ceil(request->zoom) + 1u;
     g_message("Full-page height measured: request_id=%llu document_height=%u capture_height=%u",
               (unsigned long long) request->id, document_height,
               request->capture_height);
@@ -1550,11 +1929,19 @@ on_document_height_ready(GObject *source, GAsyncResult *result,
         request_finish(request, 413,
                        "Rendered image exceeds the 60 MiB raw image limit.\n",
                        NULL, FALSE);
-    } else if (document_height > MAX_FULL_DOCUMENT_SNAPSHOT_HEIGHT + 2u) {
-        request->capture_pixels_length = row_bytes * request->capture_height;
-        request->capture_pixels = g_try_malloc0(
-            request->capture_pixels_length);
-        if (!request->capture_pixels) {
+    } else if (document_height > MAX_FULL_DOCUMENT_SNAPSHOT_HEIGHT +
+                                  rounding_tolerance) {
+        gboolean allocated = FALSE;
+        if (request->format == OUTPUT_FORMAT_PNG) {
+            request->png_stream = png_stream_encoder_new(
+                request->width, request->capture_height, rounding_tolerance);
+            allocated = request->png_stream != NULL;
+        } else {
+            request->capture_pixels = g_try_malloc0(
+                row_bytes * request->capture_height);
+            allocated = request->capture_pixels != NULL;
+        }
+        if (!allocated) {
             request_finish(request, 503,
                            "WPE could not allocate the full-page image.\n",
                            NULL, FALSE);
@@ -1577,7 +1964,8 @@ start_tiled_scroll(RenderRequest *request)
     gchar *script = g_strdup_printf(
         "(()=>{const root=document.scrollingElement||document.documentElement;"
         "const behavior=root.style.scrollBehavior;root.style.scrollBehavior='auto';"
-        "window.scrollTo(0,%u/(%s));const offset=Math.round(window.scrollY*(%s));"
+        "window.scrollTo(0,Math.floor(%u/(%s)));"
+        "const offset=Math.round(window.scrollY*(%s));"
         "root.style.scrollBehavior=behavior;return offset;})()",
         request->capture_offset_y, zoom_text, zoom_text);
     g_message("Full-page tile scroll requested: request_id=%llu offset_y=%u",
@@ -1606,7 +1994,7 @@ on_tiled_scroll_ready(GObject *source, GAsyncResult *result,
     GError *error = NULL;
     JSCValue *value = webkit_web_view_evaluate_javascript_finish(
         WEBKIT_WEB_VIEW(source), result, &error);
-    if (!current_request(request)) {
+    if (!current_view_request(request, source)) {
         g_clear_object(&value);
         g_clear_error(&error);
         request_unref(request);
@@ -1617,7 +2005,7 @@ on_tiled_scroll_ready(GObject *source, GAsyncResult *result,
     guint offset = 0;
     gboolean valid_offset = !error && offset_text &&
         parse_bounded_uint("scroll offset", offset_text, 0,
-                           MAX_AUTO_HEIGHT, &offset);
+                           request->app->max_auto_height, &offset);
     g_free(offset_text);
     g_clear_object(&value);
     g_clear_error(&error);
@@ -1627,16 +2015,39 @@ on_tiled_scroll_ready(GObject *source, GAsyncResult *result,
                        NULL, TRUE);
     } else if (request->capture_offset_y > 0 &&
                offset <= request->tile_scroll_y) {
-        request_finish(request, 422,
-                       "Full-page capture requires a page that scrolls vertically.\n",
-                       NULL, TRUE);
+        guint missing_rows = request->capture_height - request->capture_offset_y;
+        guint rounding_tolerance = (guint) ceil(request->zoom) + 1u;
+        if (missing_rows <= rounding_tolerance && request->capture_offset_y) {
+            g_message("Full-page capture reached scroll limit: request_id=%llu missing_rows=%u repeated_last_row=1",
+                      (unsigned long long) request->id, missing_rows);
+            if (request->png_stream) {
+                request->pad_final_png_rows = TRUE;
+            } else {
+                gsize row_bytes = (gsize) request->width * 4u;
+                const guint8 *last_row = request->capture_pixels +
+                    (gsize) (request->capture_offset_y - 1u) * row_bytes;
+                for (guint row = 0; row < missing_rows; ++row) {
+                    guint8 *destination_row = request->capture_pixels +
+                        (gsize) (request->capture_offset_y + row) * row_bytes;
+                    memcpy(destination_row, last_row, row_bytes);
+                }
+                request->capture_offset_y = request->capture_height;
+            }
+            restore_tiled_scroll(request);
+        } else {
+            request_finish(request, 422,
+                           "Full-page capture cannot reach the measured height; the page may not scroll vertically.\n",
+                           NULL, TRUE);
+        }
     } else {
         request->tile_scroll_y = offset;
-        g_message("Full-page tile scrolled: request_id=%llu offset_y=%u scroll_y=%u",
+        guint settle_ms = request->capture_offset_y ?
+            request->app->full_page_tile_wait_ms : 0u;
+        g_message("Full-page tile scrolled: request_id=%llu offset_y=%u scroll_y=%u settle_ms=%u",
                   (unsigned long long) request->id,
-                  request->capture_offset_y, offset);
+                  request->capture_offset_y, offset, settle_ms);
         request->tile_source = add_request_timeout(
-            50, capture_tiled_viewport, request);
+            MAX(settle_ms, 1u), capture_tiled_viewport, request);
     }
     request_unref(request);
 }
@@ -1649,7 +2060,7 @@ on_tiled_scroll_restored(GObject *source, GAsyncResult *result,
     GError *error = NULL;
     JSCValue *value = webkit_web_view_evaluate_javascript_finish(
         WEBKIT_WEB_VIEW(source), result, &error);
-    if (!current_request(request)) {
+    if (!current_view_request(request, source)) {
         g_clear_object(&value);
         g_clear_error(&error);
         request_unref(request);
@@ -1660,7 +2071,7 @@ on_tiled_scroll_restored(GObject *source, GAsyncResult *result,
     guint offset = 1;
     gboolean restored = !error && offset_text &&
         parse_bounded_uint("restored scroll offset", offset_text, 0,
-                           MAX_AUTO_HEIGHT, &offset) && offset == 0;
+                           request->app->max_auto_height, &offset) && offset == 0;
     g_free(offset_text);
     g_clear_object(&value);
     g_clear_error(&error);
@@ -1668,13 +2079,14 @@ on_tiled_scroll_restored(GObject *source, GAsyncResult *result,
     if (!restored)
         g_warning("Could not reset full-page scroll before encoding: request_id=%llu",
                   (unsigned long long) request->id);
-    guint8 *pixels = request->capture_pixels;
-    request->capture_pixels = NULL;
-    request->capture_pixels_length = 0;
-    if (!pixels) {
+    if (request->png_stream) {
+        finish_png_stream_async(request, request->pad_final_png_rows);
+    } else if (!request->capture_pixels) {
         request_finish(request, 503,
                        "WPE could not encode the full-page image.\n", NULL, TRUE);
     } else {
+        guint8 *pixels = request->capture_pixels;
+        request->capture_pixels = NULL;
         encode_snapshot_async(request, pixels, request->width * 4u,
                               request->width, request->capture_height, NULL,
                               pixels, TRUE);
@@ -1700,6 +2112,44 @@ typedef struct {
     gboolean too_large;
     gboolean allocation_failed;
 } PngWriter;
+
+struct _PngStreamEncoder {
+    PngWriter writer;
+    png_structp png;
+    png_infop info;
+    guint8 *row;
+    guint8 *last_row;
+    guint width;
+    guint height;
+    guint rows_written;
+    guint pad_tolerance_rows;
+    gboolean initialized;
+};
+
+static PngStreamEncoder *
+png_stream_encoder_new(guint width, guint height, guint pad_tolerance_rows)
+{
+    PngStreamEncoder *encoder = g_try_new0(PngStreamEncoder, 1);
+    if (encoder) {
+        encoder->width = width;
+        encoder->height = height;
+        encoder->pad_tolerance_rows = pad_tolerance_rows;
+    }
+    return encoder;
+}
+
+static void
+png_stream_encoder_free(PngStreamEncoder *encoder)
+{
+    if (!encoder)
+        return;
+    if (encoder->png)
+        png_destroy_write_struct(&encoder->png, &encoder->info);
+    g_free(encoder->writer.data);
+    g_free(encoder->row);
+    g_free(encoder->last_row);
+    g_free(encoder);
+}
 
 static void
 png_write_bounded(png_structp png, png_bytep data, png_size_t length)
@@ -1799,6 +2249,243 @@ encode_png(const guint8 *source, guint source_stride, guint width, guint height,
     gsize encoded_length = writer->length;
     g_free(writer);
     return g_bytes_new_take(encoded, encoded_length);
+}
+
+typedef struct {
+    PngStreamEncoder *encoder;
+    GBytes *source_bytes;
+    guint stride;
+    guint source_y;
+    guint rows;
+    gboolean finish;
+    gboolean pad_remaining_rows;
+} PngStreamTaskData;
+
+typedef struct {
+    GBytes *image;
+    guint rows;
+    gboolean success;
+    gboolean too_large;
+    gboolean finish;
+} PngStreamTaskResult;
+
+static gboolean
+png_stream_encode(PngStreamEncoder *encoder, const guint8 *source,
+                  gsize source_length, guint stride, guint source_y,
+                  guint rows, gboolean finish, gboolean pad_remaining_rows,
+                  GCancellable *cancellable, PngStreamTaskResult *result)
+{
+    if (!encoder->png) {
+        encoder->row = g_try_malloc((gsize) encoder->width * 4u);
+        encoder->last_row = g_try_malloc((gsize) encoder->width * 4u);
+        encoder->png = png_create_write_struct(PNG_LIBPNG_VER_STRING,
+                                                NULL, NULL, NULL);
+        if (!encoder->row || !encoder->last_row || !encoder->png)
+            return FALSE;
+        encoder->info = png_create_info_struct(encoder->png);
+        if (!encoder->info)
+            return FALSE;
+    }
+
+    if (setjmp(png_jmpbuf(encoder->png))) {
+        result->too_large = encoder->writer.too_large;
+        return FALSE;
+    }
+
+    if (!encoder->initialized) {
+        png_set_write_fn(encoder->png, &encoder->writer,
+                         png_write_bounded, png_flush_bounded);
+        png_set_IHDR(encoder->png, encoder->info,
+                     encoder->width, encoder->height, 8,
+                     PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE,
+                     PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+        png_set_compression_level(encoder->png, 1);
+        png_set_filter(encoder->png, PNG_FILTER_TYPE_BASE, PNG_FILTER_NONE);
+        png_write_info(encoder->png, encoder->info);
+        encoder->initialized = TRUE;
+    }
+
+    if (finish) {
+        if (encoder->rows_written > encoder->height)
+            return FALSE;
+        guint missing_rows = encoder->height - encoder->rows_written;
+        if (missing_rows && (!pad_remaining_rows || !encoder->rows_written ||
+                             missing_rows > encoder->pad_tolerance_rows))
+            return FALSE;
+        if (missing_rows) {
+            memcpy(encoder->row, encoder->last_row,
+                   (gsize) encoder->width * 4u);
+            while (encoder->rows_written < encoder->height) {
+                if (g_cancellable_is_cancelled(cancellable))
+                    return FALSE;
+                png_write_row(encoder->png, encoder->row);
+                encoder->rows_written++;
+            }
+        }
+        png_write_end(encoder->png, encoder->info);
+        png_destroy_write_struct(&encoder->png, &encoder->info);
+        encoder->initialized = FALSE;
+        result->image = g_bytes_new_take(encoder->writer.data,
+                                        encoder->writer.length);
+        encoder->writer.data = NULL;
+        encoder->writer.length = 0;
+        encoder->writer.capacity = 0;
+        result->success = result->image != NULL;
+        return result->success;
+    }
+
+    if (!source || stride < (gsize) encoder->width * 4u ||
+        source_y > G_MAXUINT - rows ||
+        (gsize) (source_y + rows) > source_length / stride ||
+        rows > encoder->height - encoder->rows_written)
+        return FALSE;
+
+    for (guint row = 0; row < rows; ++row) {
+        if (g_cancellable_is_cancelled(cancellable))
+            return FALSE;
+        const guint8 *source_row = source +
+            (gsize) (source_y + row) * stride;
+        wpe_bgra_to_rgba_row(source_row, encoder->row, encoder->width);
+        memcpy(encoder->last_row, encoder->row,
+               (gsize) encoder->width * 4u);
+        png_write_row(encoder->png, encoder->row);
+    }
+    encoder->rows_written += rows;
+    result->rows = rows;
+    result->success = TRUE;
+    return TRUE;
+}
+
+static void
+png_stream_task_data_free(gpointer user_data)
+{
+    PngStreamTaskData *data = user_data;
+    g_clear_pointer(&data->source_bytes, g_bytes_unref);
+    g_free(data);
+}
+
+static void
+png_stream_task_result_free(gpointer user_data)
+{
+    PngStreamTaskResult *result = user_data;
+    if (!result)
+        return;
+    g_clear_pointer(&result->image, g_bytes_unref);
+    g_free(result);
+}
+
+static void
+png_stream_task_worker(GTask *task, gpointer source_object, gpointer task_data,
+                       GCancellable *cancellable)
+{
+    (void) source_object;
+    PngStreamTaskData *data = task_data;
+    PngStreamTaskResult *result = g_new0(PngStreamTaskResult, 1);
+    result->finish = data->finish;
+    if (g_cancellable_is_cancelled(cancellable)) {
+        g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                "PNG stream encoding was cancelled");
+        g_free(result);
+        return;
+    }
+
+    gsize source_length = 0;
+    const guint8 *source = data->source_bytes ?
+        g_bytes_get_data(data->source_bytes, &source_length) : NULL;
+    result->success = png_stream_encode(
+        data->encoder, source, source_length, data->stride,
+        data->source_y, data->rows, data->finish,
+        data->pad_remaining_rows, cancellable, result);
+    g_task_return_pointer(task, result, png_stream_task_result_free);
+}
+
+static void
+on_png_stream_task_ready(GObject *source, GAsyncResult *async_result,
+                         gpointer user_data)
+{
+    (void) source;
+    RenderRequest *request = user_data;
+    GError *error = NULL;
+    PngStreamTaskResult *result = g_task_propagate_pointer(
+        G_TASK(async_result), &error);
+    if (!current_request(request)) {
+        png_stream_task_result_free(result);
+        g_clear_error(&error);
+        request_unref(request);
+        return;
+    }
+
+    if (error || !result || !result->success) {
+        gboolean too_large = result && result->too_large;
+        request_finish(request, too_large ? 413 : 503,
+                       too_large ? "Rendered image exceeds the 20 MiB image limit.\n" :
+                                   "WPE could not encode the full-page PNG.\n",
+                       NULL, TRUE);
+    } else if (result->finish) {
+        GBytes *image = result->image;
+        result->image = NULL;
+        request_finish(request, 200, NULL, image, TRUE);
+    } else {
+        request->capture_offset_y += result->rows;
+        g_message("Full-page PNG tile encoded: request_id=%llu rows=%u next_offset_y=%u",
+                  (unsigned long long) request->id, result->rows,
+                  request->capture_offset_y);
+        if (request->capture_offset_y < request->capture_height)
+            start_tiled_scroll(request);
+        else
+            restore_tiled_scroll(request);
+    }
+
+    png_stream_task_result_free(result);
+    g_clear_error(&error);
+    request_unref(request);
+}
+
+static void
+start_png_stream_task(RenderRequest *request, GBytes *source_bytes,
+                      guint stride, guint source_y, guint rows,
+                      gboolean finish, gboolean pad_remaining_rows)
+{
+    PngStreamEncoder *encoder = request->png_stream;
+    if (!encoder) {
+        request_finish(request, 503,
+                       "WPE could not initialize the full-page PNG encoder.\n",
+                       NULL, TRUE);
+        return;
+    }
+    PngStreamTaskData *data = g_new0(PngStreamTaskData, 1);
+    data->encoder = request->png_stream;
+    data->source_bytes = source_bytes ? g_bytes_ref(source_bytes) : NULL;
+    data->stride = stride;
+    data->source_y = source_y;
+    data->rows = rows;
+    data->finish = finish;
+    data->pad_remaining_rows = pad_remaining_rows;
+
+    if (!encoder->rows_written)
+        g_message("Full-page PNG stream started: request_id=%llu dimensions=%ux%u",
+                  (unsigned long long) request->id, encoder->width,
+                  encoder->height);
+    GTask *task = g_task_new(NULL, request->cancellable,
+                             on_png_stream_task_ready, request_ref(request));
+    g_task_set_task_data(task, data, png_stream_task_data_free);
+    g_task_set_return_on_cancel(task, FALSE);
+    g_task_run_in_thread(task, png_stream_task_worker);
+    g_object_unref(task);
+}
+
+static void
+encode_png_tile_async(RenderRequest *request, GBytes *source_bytes,
+                      guint stride, guint source_y, guint rows)
+{
+    start_png_stream_task(request, source_bytes, stride, source_y, rows,
+                          FALSE, FALSE);
+}
+
+static void
+finish_png_stream_async(RenderRequest *request, gboolean pad_remaining_rows)
+{
+    start_png_stream_task(request, NULL, 0, 0, 0, TRUE, pad_remaining_rows);
 }
 
 typedef struct {
@@ -2079,10 +2766,10 @@ output_format_mime(OutputFormat format)
 }
 
 static GBytes *
-encode_snapshot(RenderRequest *request, const guint8 *pixels, guint stride,
+encode_snapshot(OutputFormat format, const guint8 *pixels, guint stride,
                 guint width, guint height, gboolean *too_large)
 {
-    switch (request->format) {
+    switch (format) {
     case OUTPUT_FORMAT_JPEG:
         return encode_jpeg(pixels, stride, width, height, too_large);
     case OUTPUT_FORMAT_WEBP:
@@ -2101,7 +2788,7 @@ encode_snapshot(RenderRequest *request, const guint8 *pixels, guint stride,
 }
 
 typedef struct {
-    RenderRequest *request;
+    OutputFormat format;
     const guint8 *pixels;
     GBytes *source_bytes;
     guint8 *owned_pixels;
@@ -2123,7 +2810,6 @@ encode_task_data_free(gpointer user_data)
     EncodeTaskData *data = user_data;
     g_clear_pointer(&data->source_bytes, g_bytes_unref);
     g_free(data->owned_pixels);
-    request_unref(data->request);
     g_free(data);
 }
 
@@ -2147,7 +2833,7 @@ encode_snapshot_worker(GTask *task, gpointer source_object, gpointer task_data,
     EncodeTaskResult *result = g_new0(EncodeTaskResult, 1);
     result->reset_view = data->reset_view;
     if (!g_cancellable_is_cancelled(cancellable))
-        result->image = encode_snapshot(data->request, data->pixels,
+        result->image = encode_snapshot(data->format, data->pixels,
                                         data->stride, data->width,
                                         data->height, &result->too_large);
     g_task_return_pointer(task, result, encode_task_result_free);
@@ -2194,7 +2880,7 @@ encode_snapshot_async(RenderRequest *request, const guint8 *pixels,
                       gboolean reset_view)
 {
     EncodeTaskData *data = g_new0(EncodeTaskData, 1);
-    data->request = request_ref(request);
+    data->format = request->format;
     data->pixels = pixels;
     data->source_bytes = source_bytes;
     data->owned_pixels = owned_pixels;
@@ -2237,7 +2923,7 @@ on_snapshot_ready(GObject *source, GAsyncResult *result, gpointer user_data)
     RenderRequest *request = user_data;
     GError *error = NULL;
     WebKitImage *image = webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(source), result, &error);
-    if (!current_request(request)) {
+    if (!current_view_request(request, source)) {
         g_clear_object(&image);
         g_clear_error(&error);
         request_unref(request);
@@ -2295,25 +2981,11 @@ on_snapshot_ready(GObject *source, GAsyncResult *result, gpointer user_data)
         }
         guint source_y = request->capture_offset_y - request->tile_scroll_y;
         guint remaining = request->capture_height - request->capture_offset_y;
-        if (frame_bytes > source_length ||
-            (source_y >= (guint) source_height && !request->capture_offset_y)) {
+        if (frame_bytes > source_length || source_y >= (guint) source_height) {
             g_object_unref(image);
             request_finish(request, 503,
                            "WPE returned an unexpected full-page tile.\n",
                            NULL, TRUE);
-            request_unref(request);
-            return;
-        }
-
-        if (source_y >= (guint) source_height) {
-            /* Height rounding can request one unreachable final pixel. Keep
-             * the complete rows already captured and finish at that boundary. */
-            request->capture_height = request->capture_offset_y;
-            g_message("Full-page tile clamped to reachable height: request_id=%llu capture_height=%u",
-                      (unsigned long long) request->id,
-                      request->capture_height);
-            g_object_unref(image);
-            restore_tiled_scroll(request);
             request_unref(request);
             return;
         }
@@ -2327,6 +2999,15 @@ on_snapshot_ready(GObject *source, GAsyncResult *result, gpointer user_data)
             request_unref(request);
             return;
         }
+        g_message("Full-page tile captured: request_id=%llu source_y=%u rows=%u next_offset_y=%u",
+                  (unsigned long long) request->id, source_y, rows,
+                  request->capture_offset_y + rows);
+        if (request->png_stream) {
+            encode_png_tile_async(request, source_bytes, stride, source_y, rows);
+            g_object_unref(image);
+            request_unref(request);
+            return;
+        }
         for (guint row = 0; row < rows; ++row) {
             const guint8 *source_row = source_pixels +
                 (gsize) (source_y + row) * stride_bytes;
@@ -2335,9 +3016,6 @@ on_snapshot_ready(GObject *source, GAsyncResult *result, gpointer user_data)
             memcpy(destination_row, source_row, (gsize) request->width * 4u);
         }
         request->capture_offset_y += rows;
-        g_message("Full-page tile captured: request_id=%llu source_y=%u rows=%u next_offset_y=%u",
-                  (unsigned long long) request->id, source_y, rows,
-                  request->capture_offset_y);
         g_object_unref(image);
 
         if (request->capture_offset_y < request->capture_height) {
@@ -2410,7 +3088,10 @@ on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer user_data)
             if (path && g_str_has_prefix(path, "/auth/authorize")) {
                 if (parsed)
                     g_uri_unref(parsed);
-                request_finish(request, 502, "Home Assistant authentication failed.\n", NULL, TRUE);
+                if (!schedule_auth_retry(request))
+                    request_finish(request, 502,
+                                   "Home Assistant authentication failed. Verify the token and its user's permissions.\n",
+                                   NULL, TRUE);
                 return;
             }
             if (parsed)
@@ -2849,6 +3530,73 @@ parse_capture_query(GUri *uri, CaptureOptions *options, guint *status,
 }
 
 static void
+handle_capabilities(SoupServerMessage *message, App *app, GUri *uri)
+{
+    if (g_strcmp0(soup_server_message_get_method(message), "GET")) {
+        respond_error(message, 405, "Only GET is supported.\n");
+        soup_message_headers_replace(soup_server_message_get_response_headers(message),
+                                    "Allow", "GET");
+        return;
+    }
+
+    guint width = DEFAULT_IMAGE_WIDTH;
+    const gchar *query = uri ? g_uri_get_query(uri) : NULL;
+    if (query && *query) {
+        const gchar prefix[] = "width=";
+        gchar *decoded_width = g_str_has_prefix(query, prefix) &&
+            !strchr(query, '&') ?
+            g_uri_unescape_string(query + sizeof(prefix) - 1u, NULL) : NULL;
+        gboolean valid_width = decoded_width &&
+            parse_bounded_uint("width", decoded_width, 64,
+                               MAX_VIEWPORT_DIMENSION, &width);
+        g_free(decoded_width);
+        if (!valid_width) {
+            respond_error(message, 422,
+                          "capabilities accepts only width=64..4096.\n");
+            return;
+        }
+    }
+
+    const gchar *version = g_getenv("WPE_ENGINE_VERSION");
+    const gchar *renderer_state = app->renderer_ready ? "ready" :
+        app->renderer_idle_released ? "idle-released" : "unavailable";
+    gchar *version_json = js_quote(version && *version ? version : "unknown");
+    guint raw_budget_height = (guint) (MAX_RAW_IMAGE_BYTES /
+                                      ((gsize) width * 4u));
+    guint effective_auto_height = MIN(app->max_auto_height,
+                                      raw_budget_height);
+    GString *body = g_string_new(NULL);
+    g_string_append_printf(body,
+        "{\"name\":\"WPE Screenshot Engine\",\"version\":%s,"
+        "\"api_version\":1,\"renderer_state\":\"%s\","
+        "\"response_mode\":\"single-image\","
+        "\"formats\":[\"png\",\"jpeg\",\"webp\",\"bmp\"],"
+        "\"features\":{\"full_page\":true,"
+        "\"full_page_png_streaming\":true,\"tiles_stitched\":true,"
+        "\"temporary_theme_overrides\":true},"
+        "\"settings\":{\"configured_max_auto_height_px\":%u,"
+        "\"width_px\":%u,\"effective_height_cap_px\":%u,"
+        "\"full_page_tile_wait_ms\":%u,\"frontend_options_timeout_ms\":%u,"
+        "\"render_deadline_seconds\":%u,"
+        "\"dashboard_reuse_idle_seconds\":%u},"
+        "\"limits\":{\"max_viewport_dimension_px\":%u,"
+        "\"max_raw_pixel_budget_bytes\":%u,"
+        "\"max_encoded_image_bytes\":%u},"
+        "\"security\":{\"source_ip_allowlist_enabled\":%s}}\n",
+        version_json, renderer_state, app->max_auto_height, width,
+        effective_auto_height, app->full_page_tile_wait_ms,
+        app->frontend_options_timeout_ms,
+        app->render_deadline_ms / 1000u,
+        app->dashboard_reuse_idle_seconds, MAX_VIEWPORT_DIMENSION,
+        MAX_RAW_IMAGE_BYTES, MAX_OUTPUT_IMAGE_BYTES,
+        app->allowed_host_masks && app->allowed_host_masks->len ?
+            "true" : "false");
+    respond_json(message, 200, body->str);
+    g_string_free(body, TRUE);
+    g_free(version_json);
+}
+
+static void
 handle_health(SoupServerMessage *message, App *app, const gchar *path)
 {
     const gchar *method = soup_server_message_get_method(message);
@@ -2894,6 +3642,24 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
         return;
     }
 
+    gboolean health_route = raw_path &&
+        (!strcmp(raw_path, "/healthz") || !strcmp(raw_path, "/readyz"));
+    if (!health_route) {
+        gchar *remote_address = NULL;
+        if (!client_address_is_allowed(app, message, &remote_address)) {
+            g_message("Request rejected by source IP allowlist: remote=%s",
+                      remote_address ? remote_address : "unknown");
+            g_free(remote_address);
+            respond_error(message, 403, "Client IP is not allowed.\n");
+            return;
+        }
+        g_free(remote_address);
+    }
+
+    if (!g_strcmp0(raw_path, "/capabilities")) {
+        handle_capabilities(message, app, uri);
+        return;
+    }
     if (!g_strcmp0(raw_path, "/healthz") || !g_strcmp0(raw_path, "/readyz")) {
         handle_health(message, app, raw_path);
         return;
@@ -2935,6 +3701,12 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
         g_free(encoded_path);
         return;
     }
+    if (!strcmp(normalized_path, "capabilities")) {
+        handle_capabilities(message, app, uri);
+        g_free(normalized_path);
+        g_free(encoded_path);
+        return;
+    }
     if (!strchr(normalized_path, '/') &&
         (!g_strcmp0(normalized_path, "favicon.ico") ||
          !g_strcmp0(normalized_path, "robots.txt"))) {
@@ -2943,21 +3715,6 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
         respond_error(message, 404, "Not found.\n");
         return;
     }
-    if (!app_ensure_view(app)) {
-        g_free(normalized_path);
-        g_free(encoded_path);
-        respond_error(message, 503, "WPE renderer is unavailable.\n");
-        soup_message_headers_replace(soup_server_message_get_response_headers(message), "Retry-After", "1");
-        return;
-    }
-    if (app->active) {
-        g_free(normalized_path);
-        g_free(encoded_path);
-        respond_error(message, 503, "Renderer is busy; retry shortly.\n");
-        soup_message_headers_replace(soup_server_message_get_response_headers(message), "Retry-After", "1");
-        return;
-    }
-
     CaptureOptions options = { 0 };
     guint error_status = 400;
     const gchar *error_text = "Malformed capture request.\n";
@@ -2977,6 +3734,24 @@ handle_request(SoupServer *server, SoupServerMessage *message, const gchar *path
         g_free(options.language);
         respond_error(message, 413,
                       "Rendered image exceeds the 60 MiB raw image limit.\n");
+        return;
+    }
+    if (app->active) {
+        g_free(normalized_path);
+        g_free(encoded_path);
+        g_free(options.theme);
+        g_free(options.language);
+        respond_error(message, 503, "Renderer is busy; retry shortly.\n");
+        soup_message_headers_replace(soup_server_message_get_response_headers(message), "Retry-After", "1");
+        return;
+    }
+    if (!app_ensure_view(app)) {
+        g_free(normalized_path);
+        g_free(encoded_path);
+        g_free(options.theme);
+        g_free(options.language);
+        respond_error(message, 503, "WPE renderer is unavailable.\n");
+        soup_message_headers_replace(soup_server_message_get_response_headers(message), "Retry-After", "1");
         return;
     }
 
@@ -3071,12 +3846,12 @@ init_app(App *app)
     if (!app->view)
         return FALSE;
 
-    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.2.2",
+    app->server = soup_server_new("server-header", "wpe-screenshot-engine/0.3.0",
                                   "raw-paths", TRUE, NULL);
     soup_server_add_early_handler(app->server, NULL, handle_early_request, NULL, NULL);
     soup_server_add_handler(app->server, NULL, handle_request, app, NULL);
     GError *error = NULL;
-    if (!soup_server_listen_all(app->server, app->port, SOUP_SERVER_LISTEN_IPV4_ONLY, &error)) {
+    if (!soup_server_listen_all(app->server, app->port, 0, &error)) {
         g_printerr("startup error: HTTP listener failed\n");
         g_clear_error(&error);
         return FALSE;
@@ -3104,6 +3879,7 @@ app_clear(App *app)
     if (app->server)
         soup_server_disconnect(app->server);
     g_clear_object(&app->server);
+    app_clear_auth_bootstrap(app);
     g_clear_object(&app->view);
     g_clear_object(&app->network_session);
     g_clear_object(&app->web_context);
@@ -3122,6 +3898,7 @@ app_clear(App *app)
     g_free(app->readiness_path);
     g_free(app->expected_text);
     g_free(app->fixture_html_path);
+    g_clear_pointer(&app->allowed_host_masks, g_ptr_array_unref);
 }
 
 int
@@ -3141,6 +3918,12 @@ main(void)
     g_unix_signal_add(SIGINT, on_shutdown_signal, &app);
 
     g_message("Screenshot API ready: internal_port=%u renderer=ready", app.port);
+    g_message("HTTP listener bound to all available IPv4 and IPv6 interfaces");
+    if (app.allowed_host_masks->len)
+        g_message("Inbound source IP allowlist enabled: entries=%u",
+                  app.allowed_host_masks->len);
+    else
+        g_message("Inbound source IP allowlist disabled; all reachable clients are accepted");
     g_message("Capture routes may target any safe relative path on the configured Home Assistant origin");
     if (app.expected_text[0])
         g_message("Readiness text check enabled for route=/%s", app.readiness_path);
