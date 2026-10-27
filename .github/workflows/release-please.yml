@@ -1,0 +1,72 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Prepare release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check for a workflow-triggering token
+        id: token
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "${RELEASE_PLEASE_TOKEN}" ]]; then
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::Release Please skipped. Add the RELEASE_PLEASE_TOKEN repository secret to enable releases."
+          else
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Ensure Release Please labels exist
+        if: steps.token.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          ensure_label() {
+            local label="$1"
+            local color="$2"
+            local description="$3"
+
+            if ! gh label list --limit 1000 --json name --jq '.[].name' \
+              | grep --fixed-strings --line-regexp --quiet "${label}"; then
+              gh label create "${label}" --color "${color}" \
+                --description "${description}"
+            fi
+          }
+
+          ensure_label "autorelease: pending" "ededed" "Release pull request awaiting review."
+          ensure_label "autorelease: tagged" "0e8a16" "Release created from this pull request."
+
+      - name: Create or update the release PR
+        if: steps.token.outputs.configured == 'true'
+        id: release
+        uses: googleapis/release-please-action@v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Set the Home Assistant release title
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}"
+          --title "WPE Screenshot Engine ${RELEASE_VERSION}"

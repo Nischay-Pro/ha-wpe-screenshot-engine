@@ -55,5 +55,12 @@ repos:
         name: Home Assistant app configuration
         entry: scripts/lint-home-assistant-app.sh
         language: system
-        files: ^wpe_screenshot_engine/config\.(json|ya?ml)$
+        files: ^(wpe_screenshot_engine/config\.(json|ya?ml)|\.release-please-manifest\.json)$
+        pass_filenames: false
+
+      - id: release-please-version
+        name: Check Home Assistant and Release Please versions match
+        entry: python3 scripts/check-release-version.py
+        language: system
+        files: ^(wpe_screenshot_engine/config\.yaml|\.release-please-manifest\.json)$
         pass_filenames: false

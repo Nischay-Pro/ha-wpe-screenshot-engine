@@ -1,5 +1,7 @@
 <!-- Thanks for contributing to the WPE Screenshot Engine. -->
 
+<!-- Use feat:, fix:, or perf: in the squash title so Release Please can choose the version bump. Add ! for a breaking change. -->
+
 ## Summary
 
 <!-- What does this change do, and which issue does it address? -->
