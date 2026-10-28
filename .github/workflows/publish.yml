@@ -164,9 +164,16 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
         shell: bash
         run: |
-          app_version="$(awk -F '"' '/^version:/ { print $2; exit }' wpe_screenshot_engine/config.yaml)"
-          if [[ -z "${app_version}" ]]; then
-            echo "::error::Could not read app version from config.yaml."
+          app_version="$(awk -F: '
+            $1 == "version" {
+              value = $2
+              gsub(/[[:space:]"\047]/, "", value)
+              print value
+              exit
+            }
+          ' wpe_screenshot_engine/config.yaml)"
+          if [[ ! "${app_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not read a valid semantic app version from config.yaml."
             exit 1
           fi
 
