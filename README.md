@@ -217,3 +217,7 @@ pre-commit run --all-files
 ```
 
 GitHub Actions builds and publishes installable images for `amd64` and `arm64` when a GitHub release is published. See the [app changelog](wpe_screenshot_engine/CHANGELOG.md) for release history. [.env.example](.env.example) documents environment variables for Compose and direct Docker deployments; the Home Assistant App reads its settings from its Configuration tab.
+
+## License
+
+This project is licensed under the GNU Affero General Public License version 3 or (at your option) any later version. See [LICENSE](LICENSE). Third-party components retain their respective licenses.

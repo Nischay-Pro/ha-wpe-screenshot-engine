@@ -38,6 +38,7 @@ LABEL io.hass.name="WPE Screenshot Engine" \
       io.hass.version="${BUILD_VERSION}" \
       io.hass.arch="${BUILD_ARCH}" \
       io.hass.url="https://github.com/Nischay-Pro/ha-wpe-screenshot-engine" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/Nischay-Pro/ha-wpe-screenshot-engine"
 
 RUN apt-get update \
