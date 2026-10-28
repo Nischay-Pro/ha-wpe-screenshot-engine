@@ -51,8 +51,8 @@ trap 'exit 143' TERM
 
 cp -a "$SOURCE_DIR" "$APP_DIR"
 sed -i \
-    -e "s/^slug: \"wpe_screenshot_engine\"$/slug: \"$APP_SLUG\"/" \
-    -e 's/^name: "WPE Screenshot Engine"$/name: "WPE Screenshot Engine E2E"/' \
+    -e 's/^slug: \("wpe_screenshot_engine"\|wpe_screenshot_engine\)$/slug: "wpe_screenshot_engine_e2e"/' \
+    -e 's/^name: \("WPE Screenshot Engine"\|WPE Screenshot Engine\)$/name: "WPE Screenshot Engine E2E"/' \
     -e '/^image:/d' \
     "$APP_DIR/config.yaml"
 

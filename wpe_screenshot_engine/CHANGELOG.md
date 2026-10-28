@@ -2,6 +2,13 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/compare/0.3.0...0.4.0) (2026-10-28)
+
+
+### Added
+
+* Include AGPL-3.0-or-later as the project's first explicit license; earlier releases remain unchanged.
+
 ## [0.3.0] - 2026-10-26
 
 ### Added
