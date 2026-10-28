@@ -221,3 +221,5 @@ GitHub Actions builds and publishes installable images for `amd64` and `arm64` w
 ## License
 
 This project is licensed under the GNU Affero General Public License version 3 or (at your option) any later version. See [LICENSE](LICENSE). Third-party components retain their respective licenses.
+
+Version 0.4.0 is the first release to include this project license; earlier releases do not contain a project license file.
