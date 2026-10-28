@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-* **license:** identify 0.4.0 as first licensed release ([51bd8fa](https://github.com/Nischay-Pro/ha-wpe-screenshot-engine/commit/51bd8fa4b229e5aa2f7cb94bbaa0fb20a33e56cb))
+* Include AGPL-3.0-or-later as the project's first explicit license; earlier releases remain unchanged.
 
 ## [0.3.0] - 2026-10-26
 
